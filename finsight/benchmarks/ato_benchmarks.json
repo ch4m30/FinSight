@@ -1,0 +1,230 @@
+{
+  "_metadata": {
+    "source": "ATO Small Business Benchmarks",
+    "url": "https://www.ato.gov.au/businesses-and-organisations/small-business-benchmarks",
+    "note": "Benchmark ranges expressed as percentage of total income/turnover. Updated periodically by ATO.",
+    "last_updated": "2024"
+  },
+  "industries": {
+    "Accommodation": {
+      "display_name": "Accommodation",
+      "cost_of_sales": {"low": 18, "high": 28},
+      "labour": {"low": 28, "high": 38},
+      "rent": {"low": 6, "high": 12},
+      "motor_vehicle": {"low": 1, "high": 3},
+      "other_expenses": {"low": 20, "high": 30},
+      "gross_profit_margin": {"low": 72, "high": 82},
+      "net_profit_margin": {"low": 5, "high": 15}
+    },
+    "Automotive repair & maintenance": {
+      "display_name": "Automotive repair & maintenance",
+      "cost_of_sales": {"low": 28, "high": 40},
+      "labour": {"low": 22, "high": 32},
+      "rent": {"low": 4, "high": 9},
+      "motor_vehicle": {"low": 3, "high": 7},
+      "other_expenses": {"low": 12, "high": 20},
+      "gross_profit_margin": {"low": 60, "high": 72},
+      "net_profit_margin": {"low": 5, "high": 15}
+    },
+    "Building & construction - general": {
+      "display_name": "Building & construction - general",
+      "cost_of_sales": {"low": 55, "high": 70},
+      "labour": {"low": 8, "high": 16},
+      "rent": {"low": 1, "high": 3},
+      "motor_vehicle": {"low": 3, "high": 7},
+      "other_expenses": {"low": 8, "high": 15},
+      "gross_profit_margin": {"low": 30, "high": 45},
+      "net_profit_margin": {"low": 5, "high": 15}
+    },
+    "Building & construction - residential": {
+      "display_name": "Building & construction - residential",
+      "cost_of_sales": {"low": 60, "high": 75},
+      "labour": {"low": 5, "high": 12},
+      "rent": {"low": 1, "high": 3},
+      "motor_vehicle": {"low": 2, "high": 5},
+      "other_expenses": {"low": 6, "high": 12},
+      "gross_profit_margin": {"low": 25, "high": 40},
+      "net_profit_margin": {"low": 4, "high": 12}
+    },
+    "Cafes & restaurants": {
+      "display_name": "Cafes & restaurants",
+      "cost_of_sales": {"low": 28, "high": 40},
+      "labour": {"low": 28, "high": 38},
+      "rent": {"low": 8, "high": 15},
+      "motor_vehicle": {"low": 1, "high": 3},
+      "other_expenses": {"low": 10, "high": 18},
+      "gross_profit_margin": {"low": 60, "high": 72},
+      "net_profit_margin": {"low": 3, "high": 10}
+    },
+    "Convenience stores & petrol stations": {
+      "display_name": "Convenience stores & petrol stations",
+      "cost_of_sales": {"low": 60, "high": 75},
+      "labour": {"low": 8, "high": 15},
+      "rent": {"low": 3, "high": 7},
+      "motor_vehicle": {"low": 1, "high": 3},
+      "other_expenses": {"low": 5, "high": 10},
+      "gross_profit_margin": {"low": 25, "high": 40},
+      "net_profit_margin": {"low": 2, "high": 8}
+    },
+    "Electrical services": {
+      "display_name": "Electrical services",
+      "cost_of_sales": {"low": 30, "high": 45},
+      "labour": {"low": 20, "high": 30},
+      "rent": {"low": 2, "high": 5},
+      "motor_vehicle": {"low": 4, "high": 9},
+      "other_expenses": {"low": 10, "high": 18},
+      "gross_profit_margin": {"low": 55, "high": 70},
+      "net_profit_margin": {"low": 6, "high": 16}
+    },
+    "Financial & insurance services": {
+      "display_name": "Financial & insurance services",
+      "cost_of_sales": {"low": 5, "high": 15},
+      "labour": {"low": 25, "high": 40},
+      "rent": {"low": 5, "high": 12},
+      "motor_vehicle": {"low": 2, "high": 5},
+      "other_expenses": {"low": 20, "high": 35},
+      "gross_profit_margin": {"low": 85, "high": 95},
+      "net_profit_margin": {"low": 10, "high": 25}
+    },
+    "Food retailing": {
+      "display_name": "Food retailing",
+      "cost_of_sales": {"low": 55, "high": 70},
+      "labour": {"low": 10, "high": 18},
+      "rent": {"low": 4, "high": 9},
+      "motor_vehicle": {"low": 1, "high": 3},
+      "other_expenses": {"low": 6, "high": 12},
+      "gross_profit_margin": {"low": 30, "high": 45},
+      "net_profit_margin": {"low": 3, "high": 10}
+    },
+    "Hairdressing & beauty services": {
+      "display_name": "Hairdressing & beauty services",
+      "cost_of_sales": {"low": 10, "high": 22},
+      "labour": {"low": 35, "high": 50},
+      "rent": {"low": 7, "high": 14},
+      "motor_vehicle": {"low": 1, "high": 3},
+      "other_expenses": {"low": 10, "high": 20},
+      "gross_profit_margin": {"low": 78, "high": 90},
+      "net_profit_margin": {"low": 5, "high": 15}
+    },
+    "IT services": {
+      "display_name": "IT services",
+      "cost_of_sales": {"low": 15, "high": 30},
+      "labour": {"low": 30, "high": 45},
+      "rent": {"low": 3, "high": 8},
+      "motor_vehicle": {"low": 2, "high": 5},
+      "other_expenses": {"low": 12, "high": 22},
+      "gross_profit_margin": {"low": 70, "high": 85},
+      "net_profit_margin": {"low": 10, "high": 22}
+    },
+    "Legal services": {
+      "display_name": "Legal services",
+      "cost_of_sales": {"low": 5, "high": 15},
+      "labour": {"low": 35, "high": 50},
+      "rent": {"low": 6, "high": 12},
+      "motor_vehicle": {"low": 1, "high": 4},
+      "other_expenses": {"low": 15, "high": 28},
+      "gross_profit_margin": {"low": 85, "high": 95},
+      "net_profit_margin": {"low": 12, "high": 28}
+    },
+    "Mechanical repairs": {
+      "display_name": "Mechanical repairs",
+      "cost_of_sales": {"low": 30, "high": 45},
+      "labour": {"low": 20, "high": 30},
+      "rent": {"low": 4, "high": 9},
+      "motor_vehicle": {"low": 3, "high": 7},
+      "other_expenses": {"low": 10, "high": 18},
+      "gross_profit_margin": {"low": 55, "high": 70},
+      "net_profit_margin": {"low": 5, "high": 15}
+    },
+    "Medical services": {
+      "display_name": "Medical services",
+      "cost_of_sales": {"low": 5, "high": 15},
+      "labour": {"low": 30, "high": 45},
+      "rent": {"low": 8, "high": 15},
+      "motor_vehicle": {"low": 1, "high": 4},
+      "other_expenses": {"low": 15, "high": 28},
+      "gross_profit_margin": {"low": 85, "high": 95},
+      "net_profit_margin": {"low": 15, "high": 30}
+    },
+    "Non-food retailing": {
+      "display_name": "Non-food retailing",
+      "cost_of_sales": {"low": 45, "high": 62},
+      "labour": {"low": 12, "high": 22},
+      "rent": {"low": 6, "high": 12},
+      "motor_vehicle": {"low": 1, "high": 3},
+      "other_expenses": {"low": 8, "high": 15},
+      "gross_profit_margin": {"low": 38, "high": 55},
+      "net_profit_margin": {"low": 4, "high": 12}
+    },
+    "Plumbing services": {
+      "display_name": "Plumbing services",
+      "cost_of_sales": {"low": 30, "high": 45},
+      "labour": {"low": 20, "high": 30},
+      "rent": {"low": 2, "high": 5},
+      "motor_vehicle": {"low": 5, "high": 10},
+      "other_expenses": {"low": 8, "high": 15},
+      "gross_profit_margin": {"low": 55, "high": 70},
+      "net_profit_margin": {"low": 8, "high": 18}
+    },
+    "Professional services": {
+      "display_name": "Professional services",
+      "cost_of_sales": {"low": 5, "high": 20},
+      "labour": {"low": 30, "high": 50},
+      "rent": {"low": 4, "high": 10},
+      "motor_vehicle": {"low": 2, "high": 5},
+      "other_expenses": {"low": 15, "high": 30},
+      "gross_profit_margin": {"low": 80, "high": 95},
+      "net_profit_margin": {"low": 10, "high": 25}
+    },
+    "Real estate services": {
+      "display_name": "Real estate services",
+      "cost_of_sales": {"low": 5, "high": 18},
+      "labour": {"low": 30, "high": 45},
+      "rent": {"low": 4, "high": 10},
+      "motor_vehicle": {"low": 3, "high": 7},
+      "other_expenses": {"low": 18, "high": 30},
+      "gross_profit_margin": {"low": 82, "high": 95},
+      "net_profit_margin": {"low": 8, "high": 20}
+    },
+    "Road freight transport": {
+      "display_name": "Road freight transport",
+      "cost_of_sales": {"low": 30, "high": 45},
+      "labour": {"low": 20, "high": 32},
+      "rent": {"low": 2, "high": 5},
+      "motor_vehicle": {"low": 10, "high": 20},
+      "other_expenses": {"low": 8, "high": 15},
+      "gross_profit_margin": {"low": 55, "high": 70},
+      "net_profit_margin": {"low": 5, "high": 12}
+    },
+    "Takeaway food": {
+      "display_name": "Takeaway food",
+      "cost_of_sales": {"low": 30, "high": 45},
+      "labour": {"low": 25, "high": 35},
+      "rent": {"low": 5, "high": 12},
+      "motor_vehicle": {"low": 1, "high": 3},
+      "other_expenses": {"low": 10, "high": 18},
+      "gross_profit_margin": {"low": 55, "high": 70},
+      "net_profit_margin": {"low": 5, "high": 12}
+    },
+    "Wholesale trade": {
+      "display_name": "Wholesale trade",
+      "cost_of_sales": {"low": 55, "high": 72},
+      "labour": {"low": 8, "high": 16},
+      "rent": {"low": 2, "high": 5},
+      "motor_vehicle": {"low": 2, "high": 5},
+      "other_expenses": {"low": 5, "high": 12},
+      "gross_profit_margin": {"low": 28, "high": 45},
+      "net_profit_margin": {"low": 3, "high": 10}
+    },
+    "Other": {
+      "display_name": "Other / Not listed",
+      "cost_of_sales": {"low": 30, "high": 55},
+      "labour": {"low": 15, "high": 35},
+      "rent": {"low": 3, "high": 10},
+      "motor_vehicle": {"low": 2, "high": 6},
+      "other_expenses": {"low": 10, "high": 20},
+      "gross_profit_margin": {"low": 45, "high": 70},
+      "net_profit_margin": {"low": 5, "high": 15}
+    }
+  }
+}
