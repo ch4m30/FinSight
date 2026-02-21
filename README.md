@@ -1,71 +1,129 @@
 # FinSight — SME Financial Analysis Tool
 
-FinSight is an internal accountant's tool for analysing SME client financial statements, generating key metrics, benchmarking against ATO small business benchmarks, and producing professional commentary as talking points for client meetings.
+FinSight is an internal accountant's tool for analysing SME client financial statements, generating key ratios, benchmarking against ATO small business benchmarks, and producing professional commentary as talking points for client meetings.
+
+**All client data stays on your machine** — AI commentary is generated via [Ollama](https://ollama.com) (a local LLM server). No data is sent to external APIs.
+
+---
 
 ## Features
 
 - **File Upload**: Accept Xero CSV/Excel exports or PDF financial statements
+- **Smart Period Detection**: Automatically detects and sorts date columns (FY2024, 2023/24, "Year ended 30 June 2024", etc.)
 - **Metrics**: 20+ financial ratios with traffic-light status (liquidity, profitability, efficiency, leverage, growth)
-- **ATO Benchmarking**: Compare client metrics against ATO small business industry benchmarks
-- **AI Commentary**: Claude-powered professional commentary structured as meeting talking points
-- **Red Flag Detection**: Automatic detection of financial warning signs
-- **Export**: PDF report, Excel workbook, and Word document export
+- **ATO Benchmarking**: Compare client metrics against ATO small business industry benchmarks (22 industries, offline fallback)
+- **AI Commentary**: Local AI commentary via Ollama — data never leaves your machine
+- **Red Flag Detection**: Automatic detection of 7 financial warning signs
+- **Polished Exports**: PDF working paper with cover page & watermark, 7-tab Excel workbook, structured Word document
 - **Demo Mode**: Built-in sample data for demonstrations
+
+---
 
 ## Setup
 
-1. Copy `.env.example` to `.env` and add your Anthropic API key:
-   ```
-   cp finsight/.env.example finsight/.env
-   ```
+### 1. Install Python dependencies
 
-2. Install dependencies:
-   ```
-   pip install -r finsight/requirements.txt
-   ```
+```bash
+pip install -r finsight/requirements.txt
+```
 
-3. Run the app from the `finsight/` directory:
-   ```
-   cd finsight && streamlit run app.py
-   ```
+### 2. Install and configure Ollama (for AI commentary)
+
+AI commentary is generated locally using [Ollama](https://ollama.com). This ensures client data never leaves your machine.
+
+**a) Install Ollama**
+
+Download from [https://ollama.com/download](https://ollama.com/download) and follow the installer for your OS.
+
+**b) Pull a model** (choose one — see RAM requirements below)
+
+```bash
+ollama pull llama3.2      # Recommended — 3B params, ~4 GB RAM
+ollama pull mistral       # 7B params, ~8 GB RAM
+ollama pull qwen2.5       # 7B params, ~8 GB RAM
+ollama pull llama3.1      # 8B params, ~8 GB RAM
+```
+
+**c) Start Ollama** (if not auto-started)
+
+```bash
+ollama serve
+```
+
+Ollama typically auto-starts on macOS. On Linux/Windows, run `ollama serve` in a terminal.
+
+**d) Verify** — you should see a green status indicator in the FinSight sidebar once Ollama is running.
+
+### 3. Run FinSight
+
+```bash
+cd finsight && streamlit run app.py
+```
+
+The app opens at [http://localhost:8501](http://localhost:8501).
+
+---
 
 ## Project Structure
 
 ```
 finsight/
-├── app.py                  # Main Streamlit app
+├── app.py                    # Main Streamlit app (8-tab UI)
 ├── parser/
-│   ├── xero_parser.py      # Xero CSV/Excel parsing
-│   └── pdf_parser.py       # PDF parsing with pdfplumber
+│   ├── xero_parser.py        # Xero CSV/Excel parsing with smart period detection
+│   └── pdf_parser.py         # PDF parsing with pdfplumber
 ├── metrics/
-│   └── calculator.py       # Financial metric calculations
+│   └── calculator.py         # 20+ financial metric calculations
 ├── benchmarks/
-│   ├── ato_fetcher.py      # ATO benchmark fetch logic
-│   └── ato_benchmarks.json # Offline fallback benchmark data
+│   ├── ato_fetcher.py        # ATO benchmark query logic
+│   └── ato_benchmarks.json   # Offline fallback benchmark data (22 industries)
 ├── commentary/
-│   └── claude_commentary.py # Anthropic API commentary generation
+│   └── claude_commentary.py  # Ollama local LLM commentary generation
 ├── exports/
-│   ├── pdf_export.py       # PDF report generation
-│   ├── excel_export.py     # Excel workbook generation
-│   └── word_export.py      # Word document generation
+│   ├── pdf_export.py         # Polished PDF with cover, watermark, sections
+│   ├── excel_export.py       # 7-tab Excel workbook
+│   └── word_export.py        # Structured Word document
+├── utils/
+│   └── formatters.py         # Shared number formatting utilities
 ├── assets/
 │   └── logo_placeholder.png
-├── .env                    # ANTHROPIC_API_KEY (gitignored)
 ├── requirements.txt
 └── README.md
 ```
 
+---
+
 ## Usage
 
-1. Launch the app and complete the **Session Setup** in the sidebar (client name, industry, financial year, etc.)
-2. Upload financial statements (Xero export or PDF) via the sidebar file uploader
-3. If uploading a PDF, review and confirm the parsed figures in the data confirmation step
-4. Navigate the tabs to explore metrics, benchmarks, and AI commentary
-5. Edit the AI commentary if needed, then export your report
+1. Launch the app and complete the **Session Setup** in the sidebar (client name, industry, FY end, firm name)
+2. Select your source type:
+   - **Xero CSV/Excel**: Upload P&L and Balance Sheet exports from Xero
+   - **PDF Financial Statements**: Upload a PDF (extraction is approximate — always review)
+   - **Demo Mode**: Explore with built-in sample data (no file needed)
+3. Click **Run Analysis** — detected period labels are shown; a warning appears if positional fallback was used
+4. Navigate the 8 tabs: Overview | Profitability | Liquidity | Efficiency | Leverage | Benchmarks | Commentary | Export
+5. In the **Commentary** tab, select an Ollama model and click **Generate AI Commentary**
+6. Edit the commentary as needed, then **Export** to PDF, Excel, or Word
+
+---
+
+## Exports
+
+| Format | Contents |
+|--------|----------|
+| **PDF** | Cover page with client details & INTERNAL USE ONLY watermark, Exec Summary, detailed metric sections, ATO benchmarks, AI commentary, Appendix |
+| **Excel** | 7 sheets: Cover, Executive Summary, Detailed Metrics, P&L Data, Balance Sheet Data, Charts, Commentary |
+| **Word** | Cover page, Exec Summary, metric sections, ATO benchmarks, AI commentary, blank Accountant's Notes page |
+
+All exports are marked **INTERNAL USE ONLY**.
+
+---
 
 ## Notes
 
-- ATO benchmarks are embedded as a fallback JSON; the app will attempt to fetch current data from the ATO website
-- ATO benchmark data is typically updated annually and may lag by one year
-- PDF parsing is imperfect — always review parsed figures before running analysis
-- All reports are marked "Prepared for internal use only — not for distribution without review"
+- ATO benchmarks are embedded as a fallback JSON; 22 industry categories with typical ranges as % of turnover
+- ATO benchmark data is updated annually and may lag by one financial year
+- PDF parsing is approximate — always review and confirm parsed figures in the confirmation step
+- Period detection supports: `FY2024`, `FY24`, `2023/24`, `Jul 2023 – Jun 2024`, `Year ended 30 June 2024`, `Current Year / Prior Year`
+- Number formatting: `$1,234,567` (currency), `42.3%` (ratios), `1.85x` (ratios), `47 days` (days)
+- Metric calculations are not modified by Ollama selection; only the commentary text is LLM-generated
