@@ -72,6 +72,111 @@ FINANCING_CF_KEYWORDS = [
 ]
 
 
+# ── Period column detection ───────────────────────────────────────────────
+
+# Relative-term priority: higher number = more recent
+_RELATIVE_PRIORITY = {
+    "current year": 100, "current": 100, "this year": 100,
+    "prior year": 50, "prior": 50, "previous year": 50,
+    "comparative": 50, "last year": 50,
+}
+
+
+def _extract_year_from_col(text: str) -> int | None:
+    """
+    Try to extract a fiscal year (integer) from a column header string.
+    Returns None if no year-like pattern is found.
+    """
+    s = str(text).strip()
+
+    # FY2024 or FY 2024
+    m = re.search(r'\bFY\s*(\d{4})\b', s, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    # FY24 → 20xx
+    m = re.search(r'\bFY\s*(\d{2})\b', s, re.IGNORECASE)
+    if m:
+        return 2000 + int(m.group(1))
+
+    # Year ended ... 2024
+    m = re.search(r'year\s+ended.*?(20\d{2})', s, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    # 2023/24 or 2023/2024 — take the later year
+    m = re.search(r'\b(20\d{2})/(\d{2,4})\b', s)
+    if m:
+        suffix = m.group(2)
+        if len(suffix) == 2:
+            return int(m.group(1)[:2] + suffix)  # 2023 + 24 → 2024
+        return int(suffix)
+
+    # Month-year range: "Jul 2023 - Jun 2024" — take the ending year
+    m = re.search(r'[A-Za-z]{3}\s+\d{4}\s*[-\u2013]\s*[A-Za-z]{3}\s+(20\d{2})', s)
+    if m:
+        return int(m.group(1))
+
+    # Bare 4-digit year: 2024
+    m = re.search(r'\b(20\d{2})\b', s)
+    if m:
+        return int(m.group(1))
+
+    return None
+
+
+def _detect_and_sort_periods(df: pd.DataFrame) -> tuple:
+    """
+    Detect period column labels from header text and sort chronologically,
+    most-recent period first (index 0 = current).
+
+    Returns:
+        df_sorted     — DataFrame with value columns reordered newest→oldest
+        period_labels — list of column name strings (up to 3)
+        used_fallback — True if date detection failed (positional order used)
+    """
+    label_col = df.columns[0]
+    value_cols = [c for c in df.columns if c != label_col]
+
+    if not value_cols:
+        return df, [], False
+
+    # 1. Try year extraction
+    col_years = {}
+    for col in value_cols:
+        yr = _extract_year_from_col(str(col))
+        if yr is not None:
+            col_years[col] = yr
+
+    if col_years:
+        # Sort all columns; unrecognised columns go to the end
+        sorted_cols = sorted(
+            value_cols,
+            key=lambda c: col_years.get(c, 0),
+            reverse=True,
+        )
+        used_fallback = len(col_years) < len(value_cols)
+        df_sorted = df[[label_col] + sorted_cols]
+        return df_sorted, [str(c).strip() for c in sorted_cols[:3]], used_fallback
+
+    # 2. Try relative terms (Current Year, Prior Year, etc.)
+    col_rel = {}
+    for col in value_cols:
+        col_lower = str(col).lower().strip()
+        for term, priority in _RELATIVE_PRIORITY.items():
+            if term in col_lower:
+                col_rel[col] = priority
+                break
+
+    if col_rel:
+        sorted_cols = sorted(value_cols, key=lambda c: col_rel.get(c, 0), reverse=True)
+        df_sorted = df[[label_col] + sorted_cols]
+        return df_sorted, [str(c).strip() for c in sorted_cols[:3]], False
+
+    # 3. Positional fallback
+    return df, [str(c).strip() for c in value_cols[:3]], True
+
+
 def _clean_amount(val) -> float | None:
     """Parse various number formats to float, returning None if unparseable."""
     if val is None:
@@ -254,61 +359,58 @@ def _clean_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
 def parse_xero_pl(uploaded_file) -> dict:
     """
     Parse a Xero P&L export.
-    Returns dict with 'current' and 'prior' period data.
+    Returns dict with 'current', 'prior', 'prior2', 'period_labels',
+    'period_fallback_warning' (True if positional ordering was used).
     """
     raw_df = _read_file(uploaded_file)
     df = _clean_dataframe(raw_df)
+    df_sorted, period_labels, used_fallback = _detect_and_sort_periods(df)
 
-    # Determine available period columns (skip first label column)
-    value_cols = list(df.columns[1:])
-    n_periods = len(value_cols)
-
-    result = {
-        "current": _extract_period_data(df, 0),
-        "prior": _extract_period_data(df, 1) if n_periods >= 2 else None,
-        "prior2": _extract_period_data(df, 2) if n_periods >= 3 else None,
-        "period_labels": value_cols[:3],
-        "raw_df": df,
+    n_periods = len(df_sorted.columns) - 1  # exclude label column
+    return {
+        "current": _extract_period_data(df_sorted, 0),
+        "prior": _extract_period_data(df_sorted, 1) if n_periods >= 2 else None,
+        "prior2": _extract_period_data(df_sorted, 2) if n_periods >= 3 else None,
+        "period_labels": period_labels,
+        "period_fallback_warning": used_fallback,
+        "raw_df": df_sorted,
         "type": "pl",
     }
-    return result
 
 
 def parse_xero_balance_sheet(uploaded_file) -> dict:
     """Parse a Xero Balance Sheet export."""
     raw_df = _read_file(uploaded_file)
     df = _clean_dataframe(raw_df)
+    df_sorted, period_labels, used_fallback = _detect_and_sort_periods(df)
 
-    value_cols = list(df.columns[1:])
-    n_periods = len(value_cols)
-
-    result = {
-        "current": _extract_balance_sheet_data(df, 0),
-        "prior": _extract_balance_sheet_data(df, 1) if n_periods >= 2 else None,
-        "prior2": _extract_balance_sheet_data(df, 2) if n_periods >= 3 else None,
-        "period_labels": value_cols[:3],
-        "raw_df": df,
+    n_periods = len(df_sorted.columns) - 1
+    return {
+        "current": _extract_balance_sheet_data(df_sorted, 0),
+        "prior": _extract_balance_sheet_data(df_sorted, 1) if n_periods >= 2 else None,
+        "prior2": _extract_balance_sheet_data(df_sorted, 2) if n_periods >= 3 else None,
+        "period_labels": period_labels,
+        "period_fallback_warning": used_fallback,
+        "raw_df": df_sorted,
         "type": "bs",
     }
-    return result
 
 
 def parse_xero_cashflow(uploaded_file) -> dict:
     """Parse a Xero Cash Flow Statement export."""
     raw_df = _read_file(uploaded_file)
     df = _clean_dataframe(raw_df)
+    df_sorted, period_labels, used_fallback = _detect_and_sort_periods(df)
 
-    value_cols = list(df.columns[1:])
-    n_periods = len(value_cols)
-
-    result = {
-        "current": _extract_cashflow_data(df, 0),
-        "prior": _extract_cashflow_data(df, 1) if n_periods >= 2 else None,
-        "period_labels": value_cols[:3],
-        "raw_df": df,
+    n_periods = len(df_sorted.columns) - 1
+    return {
+        "current": _extract_cashflow_data(df_sorted, 0),
+        "prior": _extract_cashflow_data(df_sorted, 1) if n_periods >= 2 else None,
+        "period_labels": period_labels,
+        "period_fallback_warning": used_fallback,
+        "raw_df": df_sorted,
         "type": "cf",
     }
-    return result
 
 
 def merge_financial_data(pl_data: dict, bs_data: dict, cf_data: dict | None = None) -> dict:

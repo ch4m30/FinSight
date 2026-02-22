@@ -1,310 +1,321 @@
 """
-AI commentary generation using the Anthropic API (claude-sonnet-4-6).
-Generates professional accountant commentary for client meetings.
+AI commentary generation using Ollama local LLM.
+All client data stays on-machine — no external API calls are made.
+
+Usage:
+  1. Install Ollama: https://ollama.com
+  2. Pull a model: ollama pull llama3.2
+  3. Ensure Ollama is running: ollama serve
 """
 
-import os
+import json
 import logging
-from typing import Optional
-from dotenv import load_dotenv
+from typing import Iterator
 
-import anthropic
+import requests
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a senior Australian CPA providing internal analysis notes for a public accounting firm. Your commentary is fact-based, professional, and structured as talking points for the accountant to use in a client meeting. Use plain English. Do not use jargon unnecessarily. Flag risks clearly but constructively. Reference specific figures. Do not give investment advice. Use Australian English spelling throughout."""
+OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_MODEL = "llama3.2"
 
-COMMENTARY_TEMPLATE = """Analyse the following financial data for {client_name} ({industry} industry, {financial_year}) and produce structured commentary for an accountant to use in a client meeting.
+SYSTEM_PROMPT = """You are an experienced Australian CPA (Chartered Professional Accountant) \
+specialising in small-to-medium enterprise (SME) financial analysis. Your role is to provide \
+clear, practical financial commentary that helps accountants prepare for client meetings.
 
-## FINANCIAL SUMMARY
+Write in plain English. Be specific with numbers. Flag concerns clearly but constructively. \
+Use Australian English spelling and conventions. Reference ATO benchmarks where relevant. \
+Keep the commentary practical and actionable."""
 
-**Period Labels:** {period_labels}
+COMMENTARY_TEMPLATE = """
+{system_prompt}
 
-### Profit & Loss
-{pl_summary}
+Please analyse the financial data below and provide structured commentary under each heading:
 
-### Balance Sheet
-{bs_summary}
+## Executive Summary
+2-3 sentences on overall financial health and the most important themes.
 
-### Cash Flow
-{cf_summary}
+## Trading Performance
+Analysis of revenue, gross profit, and profitability trends. Note any margin compression or improvement.
 
-## KEY METRICS
-{metrics_summary}
+## Cashflow & Liquidity
+Commentary on the liquidity position and quality of cash generation.
 
-## ATO BENCHMARK COMPARISONS ({industry})
-{benchmark_summary}
+## Balance Sheet Strength
+Review of asset quality, debt levels, and equity position.
 
-## RED FLAGS DETECTED
-{red_flags}
+## Key Risks & Opportunities
+3-5 specific bullet points identifying risks or opportunities from the data.
+
+## Talking Points for Client Meeting
+3-5 specific questions or discussion items to raise with the client.
 
 ---
 
-Please provide commentary in the following exact structure:
-
-### 1. Executive Summary
-(3–5 sentences summarising the overall financial position and year-on-year trend)
-
-### 2. Key Strengths
-(Bullet points with specific figures — what is working well)
-
-### 3. Areas of Concern
-(Bullet points with specific figures and suggested discussion questions for the accountant to raise with the client)
-
-### 4. ATO Benchmark Observations
-(Where the client sits relative to ATO benchmarks for their industry and what this may indicate)
-
-### 5. Suggested Focus Areas for Next Period
-(Actionable priorities the business should focus on)
-
-Keep each section concise and practical. Reference dollar amounts and percentages where relevant. Write in a style suitable for an accountant briefing document, not a formal audit report."""
+CLIENT DATA:
+{data_summary}
+"""
 
 
-def _format_currency(value) -> str:
-    if value is None:
-        return "N/A"
-    return f"${value:,.0f}"
+# ── Ollama connectivity ────────────────────────────────────────────────────
+
+def check_ollama_status(base_url: str = OLLAMA_BASE_URL) -> tuple:
+    """
+    Check whether Ollama is running and reachable.
+    Returns (is_running: bool, status_message: str).
+    """
+    try:
+        resp = requests.get(f"{base_url}/api/tags", timeout=3)
+        if resp.status_code == 200:
+            models = resp.json().get("models", [])
+            model_names = [m.get("name", "").split(":")[0] for m in models]
+            if model_names:
+                return True, f"Running — models: {', '.join(model_names[:4])}"
+            return True, "Running — no models pulled yet (run: ollama pull llama3.2)"
+        return False, f"Unexpected HTTP status {resp.status_code}"
+    except requests.exceptions.ConnectionError:
+        return False, "Not running — start with: ollama serve"
+    except requests.exceptions.Timeout:
+        return False, "Connection timed out"
+    except Exception as exc:
+        return False, str(exc)
 
 
-def _format_pct(value) -> str:
-    if value is None:
-        return "N/A"
-    return f"{value:.1f}%"
+# ── Prompt builders ────────────────────────────────────────────────────────
+
+def _fmt(v) -> str:
+    return f"${v:,.0f}" if v is not None else "N/A"
 
 
-def _format_ratio(value) -> str:
-    if value is None:
-        return "N/A"
-    return f"{value:.2f}x"
+def _chg(cur, prior) -> str:
+    if cur is not None and prior is not None and prior != 0:
+        pct = (cur - prior) / abs(prior) * 100
+        return f" ({pct:+.1f}%)"
+    return ""
 
 
-def _build_pl_summary(data: dict, period_labels: list) -> str:
-    cur = data.get("current", {}) or {}
-    prior = data.get("prior", {}) or {}
+def _build_pl_summary(financial_data: dict, period_labels: list) -> str:
+    cur = financial_data.get("current") or {}
+    pri = financial_data.get("prior") or {}
     label_cur = period_labels[0] if period_labels else "Current"
     label_pri = period_labels[1] if len(period_labels) > 1 else "Prior"
 
-    lines = [f"| Metric | {label_cur} | {label_pri} |", "|---|---|---|"]
+    lines = [f"PROFIT & LOSS ({label_cur} vs {label_pri}):"]
     fields = [
         ("revenue", "Revenue"),
-        ("cogs", "COGS"),
+        ("cogs", "Cost of Goods Sold"),
         ("gross_profit", "Gross Profit"),
         ("operating_expenses", "Operating Expenses"),
         ("ebit", "EBIT"),
         ("ebitda", "EBITDA"),
-        ("interest_expense", "Interest Expense"),
-        ("tax_expense", "Tax Expense"),
         ("net_profit", "Net Profit"),
+        ("interest_expense", "Interest Expense"),
+        ("depreciation", "Depreciation"),
     ]
     for key, label in fields:
-        c_val = _format_currency(cur.get(key))
-        p_val = _format_currency(prior.get(key))
-        lines.append(f"| {label} | {c_val} | {p_val} |")
+        c = cur.get(key)
+        p = pri.get(key)
+        if c is not None:
+            lines.append(f"  {label}: {_fmt(c)} (Prior: {_fmt(p)}){_chg(c, p)}")
     return "\n".join(lines)
 
 
-def _build_bs_summary(data: dict, period_labels: list) -> str:
-    cur = data.get("current", {}) or {}
-    prior = data.get("prior", {}) or {}
+def _build_bs_summary(financial_data: dict, period_labels: list) -> str:
+    cur = financial_data.get("current") or {}
     label_cur = period_labels[0] if period_labels else "Current"
-    label_pri = period_labels[1] if len(period_labels) > 1 else "Prior"
 
-    lines = [f"| Metric | {label_cur} | {label_pri} |", "|---|---|---|"]
+    lines = [f"BALANCE SHEET ({label_cur}):"]
     fields = [
-        ("cash", "Cash"),
+        ("cash", "Cash & Bank"),
         ("accounts_receivable", "Accounts Receivable"),
         ("inventory", "Inventory"),
-        ("current_assets", "Current Assets"),
+        ("current_assets", "Total Current Assets"),
         ("total_assets", "Total Assets"),
         ("accounts_payable", "Accounts Payable"),
-        ("current_liabilities", "Current Liabilities"),
+        ("current_liabilities", "Total Current Liabilities"),
         ("total_liabilities", "Total Liabilities"),
         ("equity", "Total Equity"),
+        ("total_debt", "Total Debt"),
     ]
     for key, label in fields:
-        c_val = _format_currency(cur.get(key))
-        p_val = _format_currency(prior.get(key))
-        lines.append(f"| {label} | {c_val} | {p_val} |")
+        v = cur.get(key)
+        if v is not None:
+            lines.append(f"  {label}: {_fmt(v)}")
     return "\n".join(lines)
 
 
-def _build_cf_summary(data: dict, period_labels: list) -> str:
-    cur = data.get("current", {}) or {}
-    prior = data.get("prior", {}) or {}
-    label_cur = period_labels[0] if period_labels else "Current"
-    label_pri = period_labels[1] if len(period_labels) > 1 else "Prior"
-
-    ocf_cur = cur.get("operating_cash_flow")
-    ocf_pri = prior.get("operating_cash_flow")
-    if ocf_cur is None and ocf_pri is None:
-        return "Cash flow statement not available."
-
-    lines = [f"| Metric | {label_cur} | {label_pri} |", "|---|---|---|"]
-    lines.append(f"| Operating Cash Flow | {_format_currency(ocf_cur)} | {_format_currency(ocf_pri)} |")
-    lines.append(f"| Investing Cash Flow | {_format_currency(cur.get('investing_cash_flow'))} | {_format_currency(prior.get('investing_cash_flow'))} |")
-    lines.append(f"| Financing Cash Flow | {_format_currency(cur.get('financing_cash_flow'))} | {_format_currency(prior.get('financing_cash_flow'))} |")
-    return "\n".join(lines)
+def _build_cf_summary(financial_data: dict) -> str:
+    cur = financial_data.get("current") or {}
+    lines = ["CASH FLOW:"]
+    for key, label in [
+        ("operating_cash_flow", "Operating CF"),
+        ("investing_cash_flow", "Investing CF"),
+        ("financing_cash_flow", "Financing CF"),
+    ]:
+        v = cur.get(key)
+        if v is not None:
+            lines.append(f"  {label}: {_fmt(v)}")
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _build_metrics_summary(metrics: dict) -> str:
-    lines = []
-    category_order = ["liquidity", "profitability", "efficiency", "leverage", "growth"]
-    category_labels = {
-        "liquidity": "LIQUIDITY",
-        "profitability": "PROFITABILITY",
-        "efficiency": "EFFICIENCY",
-        "leverage": "LEVERAGE & SOLVENCY",
-        "growth": "GROWTH",
-    }
-
-    for cat in category_order:
-        cat_metrics = [(k, v) for k, v in metrics.items() if v.category == cat]
-        if not cat_metrics:
-            continue
-        lines.append(f"\n**{category_labels[cat]}**")
-        for key, m in cat_metrics:
-            status_icon = {"green": "✅", "amber": "🟡", "red": "🔴", "grey": "⬜"}.get(m.status, "⬜")
-            trend = m.trend
-            lines.append(f"- {status_icon} {m.label}: {m.current_fmt} (Prior: {m.prior_fmt}) {trend}")
-            if m.notes:
-                lines.append(f"  {m.notes}")
-
+    lines = ["KEY CALCULATED METRICS:"]
+    status_map = {"green": "OK", "amber": "REVIEW", "red": "CONCERN", "grey": "N/A"}
+    for key, m in metrics.items():
+        flag = status_map.get(m.status, "")
+        lines.append(
+            f"  {m.label}: {m.current_fmt} [{flag}]"
+            f" (Prior: {m.prior_fmt})"
+        )
     return "\n".join(lines)
 
 
 def _build_benchmark_summary(benchmark_comparisons: dict, industry: str) -> str:
     if not benchmark_comparisons:
-        return "No benchmark data available."
-
-    lines = [f"Industry: {industry}", ""]
+        return ""
+    lines = [f"ATO SMALL BUSINESS BENCHMARKS (Industry: {industry}):"]
     for key, comp in benchmark_comparisons.items():
-        label = comp["label"]
         actual = comp.get("actual_pct")
         low = comp.get("benchmark_low")
         high = comp.get("benchmark_high")
         if actual is not None:
             in_range = low is not None and high is not None and low <= actual <= high
-            status = "✅ Within range" if in_range else "⚠️ Outside range"
-            lines.append(f"- {label}: {actual:.1f}% (ATO benchmark: {low}–{high}%) — {status}")
-
+            status = "IN RANGE" if in_range else "OUTSIDE RANGE"
+            lines.append(
+                f"  {comp['label']}: {actual:.1f}%"
+                f" (ATO range {low or '?'}%–{high or '?'}%) [{status}]"
+            )
     return "\n".join(lines)
 
 
 def build_commentary_prompt(
-    client_name: str,
-    industry: str,
-    financial_year: str,
     financial_data: dict,
     metrics: dict,
     red_flags: list,
     benchmark_comparisons: dict,
+    session_info: dict,
     period_labels: list,
 ) -> str:
-    """Build the user prompt for Claude commentary."""
-    pl_summary = _build_pl_summary(financial_data, period_labels)
-    bs_summary = _build_bs_summary(financial_data, period_labels)
-    cf_summary = _build_cf_summary(financial_data, period_labels)
-    metrics_summary = _build_metrics_summary(metrics)
-    benchmark_summary = _build_benchmark_summary(benchmark_comparisons, industry)
-    red_flags_text = "\n".join(red_flags) if red_flags else "No major red flags detected."
+    """
+    Assemble the full prompt string for the local LLM.
 
-    return COMMENTARY_TEMPLATE.format(
-        client_name=client_name,
-        industry=industry,
-        financial_year=financial_year,
-        period_labels=", ".join(period_labels),
-        pl_summary=pl_summary,
-        bs_summary=bs_summary,
-        cf_summary=cf_summary,
-        metrics_summary=metrics_summary,
-        benchmark_summary=benchmark_summary,
-        red_flags=red_flags_text,
+    Parameters mirror the AnalysisResult fields so the caller can pass them
+    directly from the result object.
+    """
+    client_name = session_info.get("client_name", "the client")
+    industry = session_info.get("industry", "")
+    fy_end = session_info.get("financial_year_end", "")
+    currency = session_info.get("currency", "AUD")
+
+    header = (
+        f"Client: {client_name}\n"
+        f"Industry: {industry}\n"
+        f"Financial Year End: {fy_end}\n"
+        f"Reporting Currency: {currency}\n"
     )
 
+    sections = [header]
+    sections.append(_build_pl_summary(financial_data, period_labels))
+    sections.append(_build_bs_summary(financial_data, period_labels))
+    cf = _build_cf_summary(financial_data)
+    if cf:
+        sections.append(cf)
+    sections.append(_build_metrics_summary(metrics))
+    bm = _build_benchmark_summary(benchmark_comparisons, industry)
+    if bm:
+        sections.append(bm)
+    if red_flags:
+        sections.append(
+            "RED FLAGS DETECTED:\n"
+            + "\n".join(f"  * {f}" for f in red_flags)
+        )
+
+    data_summary = "\n\n".join(s for s in sections if s)
+    return COMMENTARY_TEMPLATE.format(
+        system_prompt=SYSTEM_PROMPT,
+        data_summary=data_summary,
+    )
+
+
+# ── Generation functions ───────────────────────────────────────────────────
 
 def generate_commentary(
-    client_name: str,
-    industry: str,
-    financial_year: str,
-    financial_data: dict,
-    metrics: dict,
-    red_flags: list,
-    benchmark_comparisons: dict,
-    period_labels: list,
-    api_key: Optional[str] = None,
+    prompt: str,
+    model: str = DEFAULT_MODEL,
+    base_url: str = OLLAMA_BASE_URL,
 ) -> str:
     """
-    Call the Anthropic API to generate professional commentary.
-    Uses claude-sonnet-4-6 with streaming for reliability.
-    Returns the generated commentary as a string.
+    Generate commentary using Ollama (blocking, non-streaming).
+    Returns the full commentary text string.
+
+    Raises ConnectionError if Ollama is not reachable.
+    Raises TimeoutError if the request exceeds 120 seconds.
     """
-    key = api_key or os.getenv("ANTHROPIC_API_KEY")
-    if not key:
-        raise ValueError("ANTHROPIC_API_KEY not set. Please add it to your .env file.")
-
-    client = anthropic.Anthropic(api_key=key)
-
-    user_prompt = build_commentary_prompt(
-        client_name=client_name,
-        industry=industry,
-        financial_year=financial_year,
-        financial_data=financial_data,
-        metrics=metrics,
-        red_flags=red_flags,
-        benchmark_comparisons=benchmark_comparisons,
-        period_labels=period_labels,
-    )
-
-    # Use streaming to handle long responses and avoid timeouts
-    with client.messages.stream(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-    ) as stream:
-        commentary = stream.get_final_message()
-
-    return commentary.content[0].text
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+    }
+    try:
+        resp = requests.post(
+            f"{base_url}/api/generate",
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()["response"]
+    except requests.exceptions.ConnectionError:
+        raise ConnectionError(
+            "Cannot connect to Ollama. Ensure it is running: ollama serve"
+        )
+    except requests.exceptions.Timeout:
+        raise TimeoutError(
+            "Ollama request timed out after 120 s. Try a smaller model."
+        )
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"Unexpected response format from Ollama: {exc}")
 
 
 def generate_commentary_streaming(
-    client_name: str,
-    industry: str,
-    financial_year: str,
-    financial_data: dict,
-    metrics: dict,
-    red_flags: list,
-    benchmark_comparisons: dict,
-    period_labels: list,
-    api_key: Optional[str] = None,
-):
+    prompt: str,
+    model: str = DEFAULT_MODEL,
+    base_url: str = OLLAMA_BASE_URL,
+) -> Iterator[str]:
     """
-    Generator version of generate_commentary.
-    Yields text chunks as they arrive for real-time display.
+    Generate commentary using Ollama with streaming enabled.
+    Yields text chunks as they are received.
+
+    Raises ConnectionError if Ollama is not reachable.
+    Raises TimeoutError if the first response exceeds 120 seconds.
     """
-    key = api_key or os.getenv("ANTHROPIC_API_KEY")
-    if not key:
-        raise ValueError("ANTHROPIC_API_KEY not set. Please add it to your .env file.")
-
-    client = anthropic.Anthropic(api_key=key)
-
-    user_prompt = build_commentary_prompt(
-        client_name=client_name,
-        industry=industry,
-        financial_year=financial_year,
-        financial_data=financial_data,
-        metrics=metrics,
-        red_flags=red_flags,
-        benchmark_comparisons=benchmark_comparisons,
-        period_labels=period_labels,
-    )
-
-    with client.messages.stream(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-    ) as stream:
-        for text in stream.text_stream:
-            yield text
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": True,
+    }
+    try:
+        with requests.post(
+            f"{base_url}/api/generate",
+            json=payload,
+            stream=True,
+            timeout=120,
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if line:
+                    try:
+                        chunk = json.loads(line)
+                        if "response" in chunk:
+                            yield chunk["response"]
+                        if chunk.get("done"):
+                            break
+                    except json.JSONDecodeError:
+                        continue
+    except requests.exceptions.ConnectionError:
+        raise ConnectionError(
+            "Cannot connect to Ollama. Ensure it is running: ollama serve"
+        )
+    except requests.exceptions.Timeout:
+        raise TimeoutError(
+            "Ollama request timed out. Try a smaller model."
+        )

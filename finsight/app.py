@@ -31,7 +31,11 @@ from metrics.calculator import run_analysis, AnalysisResult
 from benchmarks.ato_fetcher import (
     get_industry_list, get_industry_benchmarks, get_benchmark_metadata
 )
-from commentary.claude_commentary import generate_commentary_streaming
+from commentary.claude_commentary import (
+    build_commentary_prompt,
+    generate_commentary_streaming,
+    check_ollama_status,
+)
 from exports.pdf_export import generate_pdf_report
 from exports.excel_export import generate_excel_report
 from exports.word_export import generate_word_report
@@ -97,11 +101,37 @@ st.markdown("""
         margin: 16px 0 12px 0;
     }
 
-    /* Sidebar */
+    /* Sidebar — navy background */
     [data-testid="stSidebar"] { background-color: #1B2A4A; }
-    [data-testid="stSidebar"] * { color: white !important; }
-    [data-testid="stSidebar"] .stSelectbox label,
-    [data-testid="stSidebar"] .stTextInput label { color: #D1D5DB !important; }
+
+    /* Markdown headings and plain text in sidebar */
+    [data-testid="stSidebar"] .stMarkdown,
+    [data-testid="stSidebar"] .stMarkdown p,
+    [data-testid="stSidebar"] .stMarkdown h1,
+    [data-testid="stSidebar"] .stMarkdown h2,
+    [data-testid="stSidebar"] .stMarkdown h3,
+    [data-testid="stSidebar"] .stMarkdown li { color: #F3F4F6 !important; }
+
+    /* Form labels — readable on navy */
+    [data-testid="stSidebar"] label { color: #D1D5DB !important; }
+
+    /* Radio option text */
+    [data-testid="stSidebar"] .stRadio label,
+    [data-testid="stSidebar"] .stRadio p { color: #D1D5DB !important; }
+
+    /* Input field text — dark on white background */
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] textarea { color: #1a1a1a !important; }
+
+    /* Selectbox selected value — dark on white */
+    [data-testid="stSidebar"] [data-baseweb="select"] span { color: #1a1a1a !important; }
+
+    /* Help/caption text */
+    [data-testid="stSidebar"] small,
+    [data-testid="stSidebar"] .stCaption { color: #9CA3AF !important; }
+
+    /* Divider lines */
+    [data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.2) !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -146,6 +176,8 @@ def _init_state():
         "pdf_confirmed_data": None,
         "data_source": None,
         "firm_name": "Your Accounting Firm Pty Ltd",
+        "ollama_model": "llama3.2",
+        "ollama_running": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -202,15 +234,26 @@ with st.sidebar:
     run_analysis_btn = st.button("Run Analysis", type="primary", use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### API Key")
-    api_key_input = st.text_input(
-        "Anthropic API Key",
-        type="password",
-        value=os.getenv("ANTHROPIC_API_KEY", ""),
-        help="Set ANTHROPIC_API_KEY in .env or enter here"
+    st.markdown("### AI Commentary (Ollama)")
+
+    # Ollama status check
+    _ollama_ok, _ollama_msg = check_ollama_status()
+    st.session_state.ollama_running = _ollama_ok
+    _status_icon = "🟢" if _ollama_ok else "🔴"
+    st.markdown(f"{_status_icon} **Ollama:** {_ollama_msg}")
+
+    ollama_model = st.selectbox(
+        "Model",
+        ["llama3.2", "mistral", "qwen2.5", "llama3.1"],
+        index=["llama3.2", "mistral", "qwen2.5", "llama3.1"].index(
+            st.session_state.get("ollama_model", "llama3.2")
+        ),
+        help="Local Ollama model to use. Pull with: ollama pull <model>",
     )
-    if api_key_input:
-        os.environ["ANTHROPIC_API_KEY"] = api_key_input
+    st.session_state.ollama_model = ollama_model
+
+    if not _ollama_ok:
+        st.caption("Start Ollama to enable AI commentary generation.")
 
 # ── Update session info ────────────────────────────────────────────────────
 
@@ -262,7 +305,19 @@ if run_analysis_btn:
                     result = run_analysis(merged, industry_benchmarks)
                     st.session_state.analysis_result = result
                     st.session_state.data_source = "xero"
-                    st.success("Xero files parsed successfully.")
+
+                    # Show detected period labels
+                    labels = merged["period_labels"]
+                    if pl_data.get("period_fallback_warning"):
+                        st.warning(
+                            f"⚠️ Could not detect date patterns in column headers — "
+                            f"using positional order. Detected periods: **{' | '.join(labels)}**. "
+                            "Please verify this is correct (newest column first)."
+                        )
+                    else:
+                        st.success(
+                            f"Xero files parsed. Detected periods: **{' | '.join(labels)}**"
+                        )
                 except Exception as e:
                     st.error(f"Error parsing Xero files: {e}")
                     logger.exception("Xero parse error")
@@ -383,11 +438,11 @@ if result is None:
     ### Features
     - 📊 20+ financial ratios with traffic-light status
     - 🎯 ATO small business benchmark comparison
-    - 🤖 AI-generated meeting commentary (Claude claude-sonnet-4-6)
+    - 🤖 AI-generated meeting commentary via **Ollama** (100% local — no data leaves your machine)
     - ⚠️ Automatic red flag detection
     - 📄 Export to PDF, Excel, or Word
 
-    *Add your Anthropic API key in the sidebar to enable AI commentary generation.*
+    *Ensure [Ollama](https://ollama.com) is running locally to enable AI commentary generation.*
     """)
 
 else:
@@ -779,44 +834,52 @@ else:
 
     # ── TAB 6: COMMENTARY ─────────────────────────────────────────────────
     with tabs[6]:
-        st.markdown('<div class="section-header">AI Commentary</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">AI Commentary (Ollama Local LLM)</div>', unsafe_allow_html=True)
         st.markdown(
-            "Generate professional commentary using Claude claude-sonnet-4-6. "
-            "You can edit the commentary before including it in an export."
+            "Generate professional accountant commentary using a local Ollama model. "
+            "**Client data never leaves your machine.** "
+            "Edit the commentary below before including it in an export."
         )
+
+        _is_running = st.session_state.get("ollama_running", False)
+        _model = st.session_state.get("ollama_model", "llama3.2")
 
         col_gen, col_info = st.columns([2, 3])
         with col_gen:
-            generate_btn = st.button("Generate AI Commentary", type="primary")
+            generate_btn = st.button(
+                "Generate AI Commentary",
+                type="primary",
+                disabled=not _is_running,
+                help="Ollama must be running. Start with: ollama serve" if not _is_running else f"Using model: {_model}",
+            )
+        with col_info:
+            if not _is_running:
+                st.warning("Ollama is not running. Start it with: `ollama serve`")
+            else:
+                st.info(f"Model: **{_model}** | Data stays local")
 
         if generate_btn:
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-            if not api_key:
-                st.error("Anthropic API key not set. Enter it in the sidebar or add to .env file.")
-            else:
-                commentary_container = st.empty()
-                commentary_text = ""
-                with st.spinner("Generating commentary..."):
-                    try:
-                        for chunk in generate_commentary_streaming(
-                            client_name=st.session_state.session_info.get("client_name", "Client"),
-                            industry=st.session_state.session_info.get("industry", ""),
-                            financial_year=st.session_state.session_info.get("financial_year_end", ""),
-                            financial_data=result.raw_data,
-                            metrics=result.metrics,
-                            red_flags=result.red_flags,
-                            benchmark_comparisons=result.benchmark_comparisons,
-                            period_labels=result.period_labels,
-                            api_key=api_key,
-                        ):
-                            commentary_text += chunk
-                            commentary_container.markdown(commentary_text)
+            prompt = build_commentary_prompt(
+                financial_data=result.raw_data,
+                metrics=result.metrics,
+                red_flags=result.red_flags,
+                benchmark_comparisons=result.benchmark_comparisons,
+                session_info=st.session_state.session_info,
+                period_labels=result.period_labels,
+            )
+            commentary_container = st.empty()
+            commentary_text = ""
+            with st.spinner(f"Generating commentary with {_model}... (this may take 30-60 seconds)"):
+                try:
+                    for chunk in generate_commentary_streaming(prompt, model=_model):
+                        commentary_text += chunk
+                        commentary_container.markdown(commentary_text)
 
-                        st.session_state.commentary = commentary_text
-                        st.success("Commentary generated. Edit below before exporting.")
-                    except Exception as e:
-                        st.error(f"Error generating commentary: {e}")
-                        logger.exception("Commentary generation error")
+                    st.session_state.commentary = commentary_text
+                    st.success("Commentary generated. Edit below before exporting.")
+                except Exception as e:
+                    st.error(f"Error generating commentary: {e}")
+                    logger.exception("Commentary generation error")
 
         if st.session_state.commentary:
             st.markdown("---")
