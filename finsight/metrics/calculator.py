@@ -1,6 +1,11 @@
 """
 Financial metrics calculator.
 Calculates all KPIs, applies traffic-light thresholds, and detects red flags.
+
+Bug fixes applied:
+- Bug 2: EBIT and EBITDA always calculated from components (never from parsed line)
+- Bug 3: Financial integrity self-check layer added
+- Bug 5: Inventory in ratio calculations only from balance_sheet source
 """
 
 from dataclasses import dataclass, field
@@ -29,9 +34,9 @@ class MetricResult:
     benchmark_high: Optional[float] = None
     benchmark_status: str = "grey"
     notes: str = ""
+    components: dict = field(default_factory=dict)  # Bug 2: component breakdown
 
     def formatted(self, value: Optional[float]) -> str:
-        """Return formatted string for display."""
         if value is None:
             return "N/A"
         if self.format_type == "percentage":
@@ -54,6 +59,17 @@ class MetricResult:
 
 
 @dataclass
+class SelfCheckResult:
+    """Result of a single financial integrity self-check."""
+    check_name: str
+    description: str
+    status: str          # 'pass', 'warn', 'fail'
+    detail: str
+    what_it_means: str
+    values: dict = field(default_factory=dict)
+
+
+@dataclass
 class AnalysisResult:
     """Complete analysis result for all periods."""
     metrics: dict[str, MetricResult] = field(default_factory=dict)
@@ -61,12 +77,14 @@ class AnalysisResult:
     period_labels: list[str] = field(default_factory=list)
     raw_data: dict = field(default_factory=dict)
     benchmark_comparisons: dict = field(default_factory=dict)
+    self_checks: list[SelfCheckResult] = field(default_factory=list)  # Bug 3
+    has_self_check_fails: bool = False   # Bug 3: True if any check is FAIL
+    has_self_check_warns: bool = False   # Bug 3: True if any check is WARN
 
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 def _safe_div(numerator, denominator) -> Optional[float]:
-    """Safe division returning None if denominator is zero or None."""
     if numerator is None or denominator is None:
         return None
     if denominator == 0:
@@ -75,13 +93,11 @@ def _safe_div(numerator, denominator) -> Optional[float]:
 
 
 def _pct(numerator, denominator) -> Optional[float]:
-    """Return value as percentage (0–100 scale)."""
     result = _safe_div(numerator, denominator)
     return result * 100 if result is not None else None
 
 
 def _trend(current: Optional[float], prior: Optional[float], higher_better: bool = True) -> str:
-    """Return trend arrow."""
     if current is None or prior is None:
         return "–"
     if abs(current - prior) < 0.001:
@@ -92,45 +108,336 @@ def _trend(current: Optional[float], prior: Optional[float], higher_better: bool
 
 
 def _traffic_light(value: Optional[float], thresholds: dict) -> str:
-    """
-    Apply traffic light thresholds.
-    thresholds = {'green_min': ..., 'green_max': ..., 'amber_min': ..., 'amber_max': ...}
-    or {'green_above': ..., 'amber_above': ...} for simple high-good metrics
-    or {'green_below': ..., 'amber_below': ...} for simple low-good metrics
-    """
     if value is None:
         return "grey"
-
-    # Simple threshold style: green_above / amber_above
     if "green_above" in thresholds:
         if value >= thresholds["green_above"]:
             return "green"
         elif value >= thresholds["amber_above"]:
             return "amber"
         return "red"
-
-    # Simple threshold style: green_below / amber_below (lower is better)
     if "green_below" in thresholds:
         if value <= thresholds["green_below"]:
             return "green"
         elif value <= thresholds["amber_below"]:
             return "amber"
         return "red"
-
-    # Range style
     if "green_min" in thresholds and "green_max" in thresholds:
         if thresholds["green_min"] <= value <= thresholds["green_max"]:
             return "green"
         elif thresholds.get("amber_min", float("-inf")) <= value <= thresholds.get("amber_max", float("inf")):
             return "amber"
         return "red"
-
     return "grey"
 
 
 def _get(data: dict, key: str) -> Optional[float]:
-    """Get value from data dict, returning None if missing or zero-ish for non-zero fields."""
     return data.get(key)
+
+
+# ── Bug 2: EBIT/EBITDA component calculation ──────────────────────────────────
+
+def _compute_ebit_from_components(period_data: dict) -> tuple:
+    """
+    Always calculate EBIT from: Net Profit + Income Tax Expense + Interest Expense.
+    Never rely on a parsed EBIT line.
+
+    Returns (ebit, ebitda, components_dict, assumption_notes).
+    """
+    net_profit = period_data.get("net_profit")
+    if net_profit is None:
+        return None, None, {}, ["Net Profit not available — EBIT cannot be calculated"]
+
+    interest = period_data.get("interest_expense") or 0
+    tax = period_data.get("tax_expense") or 0
+    dep = period_data.get("depreciation") or 0
+
+    assumption_notes = []
+    if interest == 0:
+        assumption_notes.append("Interest expense not identified — EBIT = Net Profit + Tax only")
+    if tax == 0:
+        assumption_notes.append("Tax expense not identified (may be partnership/trust) — EBIT = Net Profit + Interest only")
+    if dep == 0:
+        assumption_notes.append("D&A not identified — EBITDA may be understated")
+
+    ebit = net_profit + interest + tax
+    ebitda = ebit + dep
+
+    # Build component detail for UI display
+    int_components = period_data.get("_interest_components", [])
+    tax_components = period_data.get("_tax_components", [])
+    dep_components = period_data.get("_dep_components", [])
+
+    components = {
+        "net_profit": net_profit,
+        "interest_expense": interest,
+        "interest_items": int_components,
+        "tax_expense": tax,
+        "tax_items": tax_components,
+        "depreciation": dep,
+        "dep_items": dep_components,
+        "assumption_notes": assumption_notes,
+    }
+
+    return ebit, ebitda, components, assumption_notes
+
+
+# ── Bug 3: Financial integrity self-checks ────────────────────────────────────
+
+def run_self_checks(financial_data: dict) -> list[SelfCheckResult]:
+    """
+    Run all financial integrity self-checks on parsed data.
+    Returns list of SelfCheckResult objects with PASS/WARN/FAIL status.
+    """
+    checks = []
+    data = financial_data.get("data", {})
+    cur = data.get("current") or {}
+    prior = data.get("prior") or {}
+
+    # ── CHECK 1: P&L Balance ──────────────────────────────────────────────────
+    revenue = cur.get("revenue")
+    cogs = cur.get("cogs")
+    opex = cur.get("operating_expenses")
+    net_profit = cur.get("net_profit")
+    interest = cur.get("interest_expense") or 0
+    tax = cur.get("tax_expense") or 0
+
+    if all(v is not None for v in [revenue, cogs, opex, net_profit]):
+        calc_np = revenue - (cogs or 0) - (opex or 0) - interest - tax
+        diff = abs(calc_np - net_profit)
+        tolerance = max(1.0, abs(net_profit) * 0.001)  # ±$1 or 0.1%
+        if diff <= 1:
+            status = "pass"
+        elif diff <= tolerance:
+            status = "warn"
+        else:
+            status = "fail"
+        checks.append(SelfCheckResult(
+            check_name="P&L Balance",
+            description="Revenue − COGS − Operating Expenses − Interest − Tax = Net Profit",
+            status=status,
+            detail=(
+                f"Calculated Net Profit: ${calc_np:,.0f} | "
+                f"Reported Net Profit: ${net_profit:,.0f} | "
+                f"Difference: ${diff:,.0f}"
+            ),
+            what_it_means=(
+                "Verifies that P&L components add up to the reported Net Profit. "
+                "A FAIL indicates missing line items (e.g. unidentified expenses) or a parsing error."
+            ),
+            values={"calculated": calc_np, "reported": net_profit, "difference": diff},
+        ))
+    else:
+        missing = [k for k, v in [
+            ("Revenue", revenue), ("COGS", cogs),
+            ("Operating Expenses", opex), ("Net Profit", net_profit)
+        ] if v is None]
+        checks.append(SelfCheckResult(
+            check_name="P&L Balance",
+            description="Revenue − COGS − Operating Expenses − Interest − Tax = Net Profit",
+            status="warn",
+            detail=f"Cannot perform check — missing: {', '.join(missing)}",
+            what_it_means="Requires Revenue, COGS, Operating Expenses, and Net Profit to verify.",
+            values={},
+        ))
+
+    # ── CHECK 2: Gross Profit Consistency ─────────────────────────────────────
+    gross_profit = cur.get("gross_profit")
+    if revenue is not None and cogs is not None and gross_profit is not None:
+        calc_gp = revenue - cogs
+        diff = abs(gross_profit - calc_gp)
+        status = "pass" if diff <= 1 else "fail"
+        checks.append(SelfCheckResult(
+            check_name="Gross Profit Check",
+            description="Gross Profit (parsed) = Revenue − COGS",
+            status=status,
+            detail=(
+                f"Parsed GP: ${gross_profit:,.0f} | "
+                f"Calculated (Rev−COGS): ${calc_gp:,.0f} | "
+                f"Difference: ${diff:,.0f}"
+            ),
+            what_it_means=(
+                "Confirms the Gross Profit figure matches the Revenue minus COGS calculation. "
+                "A FAIL may mean the COGS or Revenue figure is a line item instead of a section total."
+            ),
+            values={"parsed": gross_profit, "calculated": calc_gp, "difference": diff},
+        ))
+    elif revenue is not None and cogs is not None:
+        # No parsed GP — derive it, no check needed
+        pass
+    else:
+        checks.append(SelfCheckResult(
+            check_name="Gross Profit Check",
+            description="Gross Profit (parsed) = Revenue − COGS",
+            status="warn",
+            detail="Cannot perform check — Revenue or COGS not available",
+            what_it_means="Requires Revenue, COGS, and Gross Profit to verify consistency.",
+            values={},
+        ))
+
+    # ── CHECK 3: Balance Sheet Equation ───────────────────────────────────────
+    total_assets = cur.get("total_assets")
+    total_liabilities = cur.get("total_liabilities")
+    equity = cur.get("equity")
+
+    if all(v is not None for v in [total_assets, total_liabilities, equity]):
+        liab_plus_eq = total_liabilities + equity
+        diff = abs(total_assets - liab_plus_eq)
+        if diff <= 1:
+            status = "pass"
+        elif diff <= total_assets * 0.005:
+            status = "warn"
+        else:
+            status = "fail"
+        checks.append(SelfCheckResult(
+            check_name="Balance Sheet Equation",
+            description="Total Assets = Total Liabilities + Equity",
+            status=status,
+            detail=(
+                f"Total Assets: ${total_assets:,.0f} | "
+                f"Liabilities + Equity: ${liab_plus_eq:,.0f} | "
+                f"Difference: ${diff:,.0f}"
+            ),
+            what_it_means=(
+                "The fundamental accounting equation. If this fails, there may be missing "
+                "balance sheet items or a parsing error that will affect all balance sheet ratios."
+            ),
+            values={"assets": total_assets, "liabilities_plus_equity": liab_plus_eq, "difference": diff},
+        ))
+    else:
+        missing = [k for k, v in [
+            ("Total Assets", total_assets),
+            ("Total Liabilities", total_liabilities),
+            ("Equity", equity)
+        ] if v is None]
+        checks.append(SelfCheckResult(
+            check_name="Balance Sheet Equation",
+            description="Total Assets = Total Liabilities + Equity",
+            status="warn",
+            detail=f"Cannot perform check — missing: {', '.join(missing)}",
+            what_it_means="Requires Total Assets, Total Liabilities, and Equity.",
+            values={},
+        ))
+
+    # ── CHECK 4: Equity Movement (prior year required, WARN only) ─────────────
+    if prior:
+        prior_equity = prior.get("equity")
+        cur_equity = cur.get("equity")
+        cur_np = cur.get("net_profit")
+
+        if all(v is not None for v in [prior_equity, cur_equity, cur_np]):
+            expected_eq = prior_equity + cur_np
+            diff = abs(cur_equity - expected_eq)
+            # Always WARN — capital movements are a normal explanation
+            status = "warn" if diff > 1 else "pass"
+            checks.append(SelfCheckResult(
+                check_name="Equity Movement",
+                description="Closing Equity ≈ Opening Equity + Net Profit (±capital movements)",
+                status=status,
+                detail=(
+                    f"Closing Equity: ${cur_equity:,.0f} | "
+                    f"Opening + Net Profit: ${expected_eq:,.0f} | "
+                    f"Unexplained movement: ${diff:,.0f}"
+                ),
+                what_it_means=(
+                    "Checks equity movement. Differences are normal if dividends, drawings, "
+                    "or capital contributions occurred during the year. This is always WARN at most — "
+                    "review if the unexplained movement is unexpected."
+                ),
+                values={"closing": cur_equity, "expected": expected_eq, "difference": diff},
+            ))
+        else:
+            checks.append(SelfCheckResult(
+                check_name="Equity Movement",
+                description="Closing Equity ≈ Opening Equity + Net Profit (±capital movements)",
+                status="warn",
+                detail="Prior year equity or current net profit not available",
+                what_it_means="Requires current and prior year equity, and current net profit.",
+                values={},
+            ))
+    # (Skip check 4 entirely if no prior data — don't add a warn for missing data)
+
+    # ── CHECK 5: Current Assets/Liabilities Subtotals ─────────────────────────
+    current_assets = cur.get("current_assets")
+    cash = cur.get("cash") or 0
+    ar = cur.get("accounts_receivable") or 0
+    inv = cur.get("inventory") or 0
+
+    if current_assets is not None and (cash or ar or inv):
+        component_sum = cash + ar + inv
+        # Components might be a subset (other CA items not captured) — only warn if > total
+        if component_sum > current_assets + 1:
+            diff = component_sum - current_assets
+            checks.append(SelfCheckResult(
+                check_name="Current Assets Subtotal",
+                description="Sum of identified current assets ≤ Total Current Assets",
+                status="warn",
+                detail=(
+                    f"Cash+AR+Inventory: ${component_sum:,.0f} | "
+                    f"Total Current Assets: ${current_assets:,.0f} | "
+                    f"Excess: ${diff:,.0f}"
+                ),
+                what_it_means=(
+                    "The sum of Cash, AR, and Inventory exceeds Total Current Assets — "
+                    "possible parsing error where a line item total was picked up instead of a subtotal."
+                ),
+                values={"components": component_sum, "total": current_assets, "excess": diff},
+            ))
+        else:
+            checks.append(SelfCheckResult(
+                check_name="Current Assets Subtotal",
+                description="Sum of identified current assets ≤ Total Current Assets",
+                status="pass",
+                detail=(
+                    f"Cash+AR+Inventory: ${component_sum:,.0f} | "
+                    f"Total Current Assets: ${current_assets:,.0f}"
+                ),
+                what_it_means=(
+                    "The identified current assets are consistent with the total. "
+                    "The difference (if any) represents other current assets not individually captured."
+                ),
+                values={"components": component_sum, "total": current_assets},
+            ))
+
+    # ── CHECK 6: Revenue Reasonableness (YoY > 50%) ───────────────────────────
+    if prior:
+        prior_revenue = prior.get("revenue")
+        cur_revenue = cur.get("revenue")
+        if prior_revenue and cur_revenue and prior_revenue > 0:
+            pct_change = (cur_revenue - prior_revenue) / prior_revenue * 100
+            abs_change = abs(pct_change)
+            if abs_change > 50:
+                checks.append(SelfCheckResult(
+                    check_name="Revenue Reasonableness",
+                    description=f"Revenue changed {pct_change:+.1f}% YoY — verify this is correct",
+                    status="warn",
+                    detail=(
+                        f"Current: ${cur_revenue:,.0f} | "
+                        f"Prior: ${prior_revenue:,.0f} | "
+                        f"Change: {pct_change:+.1f}%"
+                    ),
+                    what_it_means=(
+                        "Revenue has changed by more than 50% year-on-year. "
+                        "This could be a genuine business event (major client win/loss, COVID impact) "
+                        "or a parsing error where the wrong column was used."
+                    ),
+                    values={"current": cur_revenue, "prior": prior_revenue, "pct_change": pct_change},
+                ))
+            else:
+                checks.append(SelfCheckResult(
+                    check_name="Revenue Reasonableness",
+                    description="Revenue change within normal range (<50% YoY)",
+                    status="pass",
+                    detail=(
+                        f"Current: ${cur_revenue:,.0f} | "
+                        f"Prior: ${prior_revenue:,.0f} | "
+                        f"Change: {pct_change:+.1f}%"
+                    ),
+                    what_it_means="Year-on-year revenue movement is within expected bounds.",
+                    values={"current": cur_revenue, "prior": prior_revenue, "pct_change": pct_change},
+                ))
+
+    return checks
 
 
 # ── Metric calculators ────────────────────────────────────────────────────────
@@ -153,10 +460,17 @@ def calculate_liquidity(cur: dict, prior: dict, prior2: dict) -> dict[str, Metri
         tooltip="Current Assets ÷ Current Liabilities. Green ≥2.0, Amber 1.0–1.99, Red <1.0",
     )
 
-    # Quick Ratio
+    # Quick Ratio — Bug 5: inventory already sourced from BS current assets only
     inv = _get(cur, "inventory") or 0
     inv_p = _get(prior, "inventory") or 0
     inv_p2 = _get(prior2, "inventory") or 0
+
+    # Note if inventory was not found on BS
+    inv_note = ""
+    inv_source = cur.get("_inventory_source", "")
+    if not inv_source or inv_source == "not_found":
+        inv_note = "Inventory not identified on Balance Sheet — Quick Ratio equals Current Ratio. Inventory Days cannot be calculated."
+
     qr_cur = _safe_div(
         (_get(cur, "current_assets") or 0) - inv,
         _get(cur, "current_liabilities")
@@ -178,6 +492,7 @@ def calculate_liquidity(cur: dict, prior: dict, prior2: dict) -> dict[str, Metri
         category="liquidity",
         trend=_trend(qr_cur, qr_pri),
         tooltip="(Current Assets − Inventory) ÷ Current Liabilities. Green ≥1.0, Amber 0.5–0.99",
+        notes=inv_note,
     )
 
     # Days Cash on Hand
@@ -206,7 +521,18 @@ def calculate_liquidity(cur: dict, prior: dict, prior2: dict) -> dict[str, Metri
 def calculate_profitability(cur: dict, prior: dict, prior2: dict) -> dict[str, MetricResult]:
     metrics = {}
 
-    # Gross Profit Margin
+    # ── Bug 2: Use component-computed EBIT/EBITDA ─────────────────────────────
+    ebit_cur = cur.get("_ebit_computed")
+    ebit_pri = prior.get("_ebit_computed") if prior else None
+    ebit_p2 = prior2.get("_ebit_computed") if prior2 else None
+
+    ebitda_cur = cur.get("_ebitda_computed")
+    ebitda_pri = prior.get("_ebitda_computed") if prior else None
+    ebitda_p2 = prior2.get("_ebitda_computed") if prior2 else None
+
+    ebit_components_cur = cur.get("_ebit_components", {})
+
+    # ── Gross Profit Margin ───────────────────────────────────────────────────
     gpm_cur = _pct(_get(cur, "gross_profit"), _get(cur, "revenue"))
     gpm_pri = _pct(_get(prior, "gross_profit"), _get(prior, "revenue"))
     gpm_p2 = _pct(_get(prior2, "gross_profit"), _get(prior2, "revenue"))
@@ -214,14 +540,14 @@ def calculate_profitability(cur: dict, prior: dict, prior2: dict) -> dict[str, M
         name="gross_profit_margin",
         label="Gross Profit Margin %",
         current=gpm_cur, prior=gpm_pri, prior2=gpm_p2,
-        status="grey",  # Benchmarked against ATO — set externally
+        status="grey",
         format_type="percentage",
         category="profitability",
         trend=_trend(gpm_cur, gpm_pri),
         tooltip="Gross Profit ÷ Revenue × 100. Benchmarked against ATO industry data.",
     )
 
-    # Net Profit Margin
+    # ── Net Profit Margin ─────────────────────────────────────────────────────
     npm_cur = _pct(_get(cur, "net_profit"), _get(cur, "revenue"))
     npm_pri = _pct(_get(prior, "net_profit"), _get(prior, "revenue"))
     npm_p2 = _pct(_get(prior2, "net_profit"), _get(prior2, "revenue"))
@@ -229,17 +555,47 @@ def calculate_profitability(cur: dict, prior: dict, prior2: dict) -> dict[str, M
         name="net_profit_margin",
         label="Net Profit Margin %",
         current=npm_cur, prior=npm_pri, prior2=npm_p2,
-        status="grey",  # Benchmarked against ATO — set externally
+        status="grey",
         format_type="percentage",
         category="profitability",
         trend=_trend(npm_cur, npm_pri),
         tooltip="Net Profit ÷ Revenue × 100. Benchmarked against ATO industry data.",
     )
 
-    # EBITDA Margin
-    ebitda_m_cur = _pct(_get(cur, "ebitda"), _get(cur, "revenue"))
-    ebitda_m_pri = _pct(_get(prior, "ebitda"), _get(prior, "revenue"))
-    ebitda_m_p2 = _pct(_get(prior2, "ebitda"), _get(prior2, "revenue"))
+    # ── EBIT Margin (Bug 2: from component-computed EBIT) ─────────────────────
+    ebit_m_cur = _pct(ebit_cur, _get(cur, "revenue"))
+    ebit_m_pri = _pct(ebit_pri, _get(prior, "revenue"))
+    ebit_m_p2 = _pct(ebit_p2, _get(prior2, "revenue"))
+
+    # Build tooltip with component breakdown
+    ebit_tooltip = "EBIT ÷ Revenue × 100. EBIT = Net Profit + Tax + Interest (always calculated from components)."
+    if ebit_components_cur:
+        notes_list = ebit_components_cur.get("assumption_notes", [])
+        if notes_list:
+            ebit_tooltip += " Note: " + " | ".join(notes_list)
+
+    metrics["ebit_margin"] = MetricResult(
+        name="ebit_margin",
+        label="EBIT Margin %",
+        current=ebit_m_cur, prior=ebit_m_pri, prior2=ebit_m_p2,
+        status=_traffic_light(ebit_m_cur, {"green_above": 10, "amber_above": 3}),
+        format_type="percentage",
+        category="profitability",
+        trend=_trend(ebit_m_cur, ebit_m_pri),
+        tooltip=ebit_tooltip,
+        components=ebit_components_cur,
+        notes="; ".join(ebit_components_cur.get("assumption_notes", [])),
+    )
+
+    # ── EBITDA Margin (Bug 2: from component-computed EBITDA) ─────────────────
+    ebitda_m_cur = _pct(ebitda_cur, _get(cur, "revenue"))
+    ebitda_m_pri = _pct(ebitda_pri, _get(prior, "revenue"))
+    ebitda_m_p2 = _pct(ebitda_p2, _get(prior2, "revenue"))
+
+    dep_note = ""
+    if ebit_components_cur and (ebit_components_cur.get("depreciation") or 0) == 0:
+        dep_note = "D&A not identified — EBITDA may be understated"
+
     metrics["ebitda_margin"] = MetricResult(
         name="ebitda_margin",
         label="EBITDA Margin %",
@@ -248,10 +604,12 @@ def calculate_profitability(cur: dict, prior: dict, prior2: dict) -> dict[str, M
         format_type="percentage",
         category="profitability",
         trend=_trend(ebitda_m_cur, ebitda_m_pri),
-        tooltip="EBITDA ÷ Revenue × 100. Green ≥15%, Amber 5–14.9%, Red <5%",
+        tooltip="EBITDA ÷ Revenue × 100. Green ≥15%, Amber 5–14.9%, Red <5%. EBITDA = EBIT + D&A.",
+        notes=dep_note,
+        components=ebit_components_cur,
     )
 
-    # Return on Assets
+    # ── Return on Assets ──────────────────────────────────────────────────────
     roa_cur = _pct(_get(cur, "net_profit"), _get(cur, "total_assets"))
     roa_pri = _pct(_get(prior, "net_profit"), _get(prior, "total_assets"))
     roa_p2 = _pct(_get(prior2, "net_profit"), _get(prior2, "total_assets"))
@@ -266,7 +624,7 @@ def calculate_profitability(cur: dict, prior: dict, prior2: dict) -> dict[str, M
         tooltip="Net Profit ÷ Total Assets × 100. Green ≥10%, Amber 3–9.9%, Red <3%",
     )
 
-    # Return on Equity
+    # ── Return on Equity ──────────────────────────────────────────────────────
     roe_cur = _pct(_get(cur, "net_profit"), _get(cur, "equity"))
     roe_pri = _pct(_get(prior, "net_profit"), _get(prior, "equity"))
     roe_p2 = _pct(_get(prior2, "net_profit"), _get(prior2, "equity"))
@@ -288,18 +646,9 @@ def calculate_efficiency(cur: dict, prior: dict, prior2: dict) -> dict[str, Metr
     metrics = {}
 
     # Debtor Days
-    dd_cur = _safe_div(
-        (_get(cur, "accounts_receivable") or 0) * 365,
-        _get(cur, "revenue")
-    )
-    dd_pri = _safe_div(
-        (_get(prior, "accounts_receivable") or 0) * 365,
-        _get(prior, "revenue")
-    )
-    dd_p2 = _safe_div(
-        (_get(prior2, "accounts_receivable") or 0) * 365,
-        _get(prior2, "revenue")
-    )
+    dd_cur = _safe_div((_get(cur, "accounts_receivable") or 0) * 365, _get(cur, "revenue"))
+    dd_pri = _safe_div((_get(prior, "accounts_receivable") or 0) * 365, _get(prior, "revenue"))
+    dd_p2 = _safe_div((_get(prior2, "accounts_receivable") or 0) * 365, _get(prior2, "revenue"))
     metrics["debtor_days"] = MetricResult(
         name="debtor_days",
         label="Debtor Days",
@@ -322,7 +671,7 @@ def calculate_efficiency(cur: dict, prior: dict, prior2: dict) -> dict[str, Metr
         name="creditor_days",
         label="Creditor Days",
         current=cd_cur, prior=cd_pri, prior2=cd_p2,
-        status="grey",  # Informational
+        status="grey",
         format_type="days",
         category="efficiency",
         trend=_trend(cd_cur, cd_pri),
@@ -332,10 +681,15 @@ def calculate_efficiency(cur: dict, prior: dict, prior2: dict) -> dict[str, Metr
         ) else "",
     )
 
-    # Inventory Days
-    id_cur = _safe_div((_get(cur, "inventory") or 0) * 365, cogs)
-    id_pri = _safe_div((_get(prior, "inventory") or 0) * 365, cogs_p)
-    id_p2 = _safe_div((_get(prior2, "inventory") or 0) * 365, cogs_p2)
+    # Inventory Days — Bug 5: inventory already sourced from BS only
+    inv_source = cur.get("_inventory_source", "")
+    inv_note = ""
+    if not inv_source or inv_source == "not_found":
+        inv_note = "Inventory not identified on Balance Sheet — Inventory Days cannot be calculated."
+
+    id_cur = _safe_div((_get(cur, "inventory") or 0) * 365, cogs) if not inv_note else None
+    id_pri = _safe_div((_get(prior, "inventory") or 0) * 365, cogs_p) if not inv_note else None
+    id_p2 = _safe_div((_get(prior2, "inventory") or 0) * 365, cogs_p2) if not inv_note else None
     metrics["inventory_days"] = MetricResult(
         name="inventory_days",
         label="Inventory Days",
@@ -344,7 +698,8 @@ def calculate_efficiency(cur: dict, prior: dict, prior2: dict) -> dict[str, Metr
         format_type="days",
         category="efficiency",
         trend=_trend(id_cur, id_pri, higher_better=False),
-        tooltip="Inventory ÷ COGS × 365. Green ≤45 days, Amber 46–90 days, Red >90 days.",
+        tooltip="Inventory ÷ COGS × 365 (inventory from Balance Sheet only). Green ≤45, Amber 46–90.",
+        notes=inv_note,
     )
 
     # Cash Conversion Cycle
@@ -388,10 +743,14 @@ def calculate_leverage(cur: dict, prior: dict, prior2: dict) -> dict[str, Metric
         tooltip="Total Liabilities ÷ Total Equity. Green ≤1.0, Amber 1.01–2.0, Red >2.0",
     )
 
-    # Interest Coverage
-    ic_cur = _safe_div(_get(cur, "ebit"), _get(cur, "interest_expense"))
-    ic_pri = _safe_div(_get(prior, "ebit"), _get(prior, "interest_expense"))
-    ic_p2 = _safe_div(_get(prior2, "ebit"), _get(prior2, "interest_expense"))
+    # Interest Coverage — Bug 2: use component-computed EBIT
+    ebit_cur = cur.get("_ebit_computed") or _get(cur, "ebit")
+    ebit_pri = (prior.get("_ebit_computed") if prior else None) or _get(prior, "ebit")
+    ebit_p2 = (prior2.get("_ebit_computed") if prior2 else None) or _get(prior2, "ebit")
+
+    ic_cur = _safe_div(ebit_cur, _get(cur, "interest_expense"))
+    ic_pri = _safe_div(ebit_pri, _get(prior, "interest_expense"))
+    ic_p2 = _safe_div(ebit_p2, _get(prior2, "interest_expense"))
     metrics["interest_coverage"] = MetricResult(
         name="interest_coverage",
         label="Interest Coverage Ratio",
@@ -400,7 +759,10 @@ def calculate_leverage(cur: dict, prior: dict, prior2: dict) -> dict[str, Metric
         format_type="ratio",
         category="leverage",
         trend=_trend(ic_cur, ic_pri),
-        tooltip="EBIT ÷ Interest Expense. Green ≥3.0x, Amber 1.5–2.99x, Red <1.5x",
+        tooltip=(
+            "EBIT ÷ Interest Expense. Green ≥3.0x, Amber 1.5–2.99x, Red <1.5x. "
+            "EBIT calculated from Net Profit + Tax + Interest."
+        ),
     )
 
     # Net Debt
@@ -416,7 +778,7 @@ def calculate_leverage(cur: dict, prior: dict, prior2: dict) -> dict[str, Metric
         name="net_debt",
         label="Net Debt",
         current=nd_cur, prior=nd_pri, prior2=None,
-        status="grey",  # Informational
+        status="grey",
         format_type="currency",
         category="leverage",
         trend=_trend(nd_cur, nd_pri, higher_better=False),
@@ -427,7 +789,6 @@ def calculate_leverage(cur: dict, prior: dict, prior2: dict) -> dict[str, Metric
 
 
 def calculate_growth(cur: dict, prior: dict, prior2: dict) -> dict[str, MetricResult]:
-    """Growth metrics require at least 2 periods."""
     metrics = {}
 
     if not prior or not any(v is not None for v in prior.values()):
@@ -465,7 +826,7 @@ def calculate_growth(cur: dict, prior: dict, prior2: dict) -> dict[str, MetricRe
         tooltip="Year-on-year growth in gross profit dollars.",
     )
 
-    # Expense Growth vs Revenue Growth
+    # Expense Growth
     exp_growth = _pct(
         (_get(cur, "operating_expenses") or 0) - (_get(prior, "operating_expenses") or 0),
         _get(prior, "operating_expenses")
@@ -506,25 +867,20 @@ def calculate_growth(cur: dict, prior: dict, prior2: dict) -> dict[str, MetricRe
 
 
 def detect_red_flags(cur: dict, prior: dict, prior2: dict, metrics: dict) -> list[str]:
-    """Detect and return list of red flag warnings."""
     flags = []
 
-    # Current ratio below 1.0
     cr = metrics.get("current_ratio")
     if cr and cr.current is not None and cr.current < 1.0:
         flags.append(f"⚠️ Current Ratio is {cr.current:.2f}x — below 1.0x signals potential liquidity issues.")
 
-    # Interest coverage below 1.5x
     ic = metrics.get("interest_coverage")
     if ic and ic.current is not None and ic.current < 1.5:
         flags.append(f"⚠️ Interest Coverage is {ic.current:.2f}x — below 1.5x indicates earnings may not cover interest.")
 
-    # Net loss
     net_profit = _get(cur, "net_profit")
     if net_profit is not None and net_profit < 0:
         flags.append(f"⚠️ Net Loss of ${abs(net_profit):,.0f} recorded in current period.")
 
-    # AR growing faster than revenue
     if prior:
         rev_cur = _get(cur, "revenue") or 0
         rev_pri = _get(prior, "revenue") or 1
@@ -539,7 +895,6 @@ def detect_red_flags(cur: dict, prior: dict, prior2: dict, metrics: dict) -> lis
                     f"{rev_growth*100:.1f}% — possible collection issues."
                 )
 
-    # Inventory growing faster than COGS
     if prior:
         cogs_cur = _get(cur, "cogs") or 0
         cogs_pri = _get(prior, "cogs") or 1
@@ -554,7 +909,6 @@ def detect_red_flags(cur: dict, prior: dict, prior2: dict, metrics: dict) -> lis
                     f"{cogs_growth*100:.1f}% — possible slow-moving stock."
                 )
 
-    # Revenue growth with declining operating cash flow
     if prior:
         rev_cur = _get(cur, "revenue") or 0
         rev_pri = _get(prior, "revenue") or 0
@@ -567,7 +921,6 @@ def detect_red_flags(cur: dict, prior: dict, prior2: dict, metrics: dict) -> lis
                     f"${ocf_pri:,.0f} to ${ocf_cur:,.0f} — quality of earnings concern."
                 )
 
-    # Expenses growing faster than revenue
     exp_metric = metrics.get("expense_growth")
     rev_metric = metrics.get("revenue_growth")
     if exp_metric and rev_metric:
@@ -581,13 +934,11 @@ def detect_red_flags(cur: dict, prior: dict, prior2: dict, metrics: dict) -> lis
 
 
 def apply_ato_benchmarks(metrics: dict, industry_benchmarks: dict) -> dict:
-    """Apply ATO benchmark status to relevant metrics."""
     from benchmarks.ato_fetcher import benchmark_status
 
     if not industry_benchmarks:
         return metrics
 
-    # Gross profit margin
     gpm = metrics.get("gross_profit_margin")
     if gpm and gpm.current is not None:
         bm = industry_benchmarks.get("gross_profit_margin", {})
@@ -597,7 +948,6 @@ def apply_ato_benchmarks(metrics: dict, industry_benchmarks: dict) -> dict:
             gpm.status = benchmark_status(gpm.current, bm["low"], bm["high"])
             gpm.benchmark_status = gpm.status
 
-    # Net profit margin
     npm = metrics.get("net_profit_margin")
     if npm and npm.current is not None:
         bm = industry_benchmarks.get("net_profit_margin", {})
@@ -611,10 +961,6 @@ def apply_ato_benchmarks(metrics: dict, industry_benchmarks: dict) -> dict:
 
 
 def calculate_benchmark_comparisons(cur: dict, industry_benchmarks: dict) -> dict:
-    """
-    Calculate ATO benchmark comparisons (as % of revenue).
-    Returns dict of comparison data for each benchmark metric.
-    """
     comparisons = {}
     revenue = _get(cur, "revenue")
     if not revenue or not industry_benchmarks:
@@ -622,7 +968,7 @@ def calculate_benchmark_comparisons(cur: dict, industry_benchmarks: dict) -> dic
 
     benchmark_map = {
         "cost_of_sales": ("cogs", "Cost of Sales"),
-        "labour": ("operating_expenses", "Labour / Wages"),  # Approximation
+        "labour": ("operating_expenses", "Labour / Wages"),
         "rent": (None, "Rent"),
         "motor_vehicle": (None, "Motor Vehicle Expenses"),
     }
@@ -653,11 +999,21 @@ def run_analysis(financial_data: dict, industry_benchmarks: dict = None) -> Anal
     prior = data.get("prior") or {}
     prior2 = data.get("prior2") or {}
 
+    # ── Bug 2: Pre-compute component-based EBIT/EBITDA for all periods ────────
+    for period_data in [cur, prior, prior2]:
+        if not period_data:
+            continue
+        ebit, ebitda, components, _ = _compute_ebit_from_components(period_data)
+        if ebit is not None:
+            period_data["_ebit_computed"] = ebit
+            period_data["_ebitda_computed"] = ebitda
+            period_data["_ebit_components"] = components
+
     result = AnalysisResult()
     result.period_labels = financial_data.get("period_labels", ["Current", "Prior"])
     result.raw_data = data
 
-    # Calculate all metric groups
+    # ── Calculate all metric groups ───────────────────────────────────────────
     all_metrics = {}
     all_metrics.update(calculate_liquidity(cur, prior, prior2))
     all_metrics.update(calculate_profitability(cur, prior, prior2))
@@ -665,12 +1021,17 @@ def run_analysis(financial_data: dict, industry_benchmarks: dict = None) -> Anal
     all_metrics.update(calculate_leverage(cur, prior, prior2))
     all_metrics.update(calculate_growth(cur, prior, prior2))
 
-    # Apply ATO benchmarks
     if industry_benchmarks:
         all_metrics = apply_ato_benchmarks(all_metrics, industry_benchmarks)
 
     result.metrics = all_metrics
     result.red_flags = detect_red_flags(cur, prior, prior2, all_metrics)
     result.benchmark_comparisons = calculate_benchmark_comparisons(cur, industry_benchmarks or {})
+
+    # ── Bug 3: Run financial integrity self-checks ────────────────────────────
+    self_checks = run_self_checks(financial_data)
+    result.self_checks = self_checks
+    result.has_self_check_fails = any(c.status == "fail" for c in self_checks)
+    result.has_self_check_warns = any(c.status == "warn" for c in self_checks)
 
     return result

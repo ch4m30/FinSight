@@ -27,7 +27,7 @@ from parser.xero_parser import (
 from parser.pdf_parser import (
     parse_pdf, get_confirmation_template, build_confirmed_data, ALL_FIELDS
 )
-from metrics.calculator import run_analysis, AnalysisResult
+from metrics.calculator import run_analysis, AnalysisResult, SelfCheckResult
 from benchmarks.ato_fetcher import (
     get_industry_list, get_industry_benchmarks, get_benchmark_metadata
 )
@@ -103,35 +103,37 @@ st.markdown("""
 
     /* Sidebar — navy background */
     [data-testid="stSidebar"] { background-color: #1B2A4A; }
-
-    /* Markdown headings and plain text in sidebar */
     [data-testid="stSidebar"] .stMarkdown,
     [data-testid="stSidebar"] .stMarkdown p,
     [data-testid="stSidebar"] .stMarkdown h1,
     [data-testid="stSidebar"] .stMarkdown h2,
     [data-testid="stSidebar"] .stMarkdown h3,
     [data-testid="stSidebar"] .stMarkdown li { color: #F3F4F6 !important; }
-
-    /* Form labels — readable on navy */
     [data-testid="stSidebar"] label { color: #D1D5DB !important; }
-
-    /* Radio option text */
     [data-testid="stSidebar"] .stRadio label,
     [data-testid="stSidebar"] .stRadio p { color: #D1D5DB !important; }
-
-    /* Input field text — dark on white background */
     [data-testid="stSidebar"] input,
     [data-testid="stSidebar"] textarea { color: #1a1a1a !important; }
-
-    /* Selectbox selected value — dark on white */
     [data-testid="stSidebar"] [data-baseweb="select"] span { color: #1a1a1a !important; }
-
-    /* Help/caption text */
     [data-testid="stSidebar"] small,
     [data-testid="stSidebar"] .stCaption { color: #9CA3AF !important; }
-
-    /* Divider lines */
     [data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.2) !important; }
+
+    /* Self-check rows */
+    .check-pass { background: #F0FDF4; border-left: 3px solid #16A34A; padding: 6px 10px; margin: 3px 0; border-radius: 4px; }
+    .check-warn { background: #FFFBEB; border-left: 3px solid #D97706; padding: 6px 10px; margin: 3px 0; border-radius: 4px; }
+    .check-fail { background: #FEF2F2; border-left: 3px solid #DC2626; padding: 6px 10px; margin: 3px 0; border-radius: 4px; }
+
+    /* Data quality warn banner */
+    .dq-warn-banner {
+        background: #FFFBEB;
+        border: 1px solid #D97706;
+        border-radius: 6px;
+        padding: 10px 14px;
+        margin-bottom: 10px;
+        color: #92400E;
+        font-size: 0.9rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -163,6 +165,71 @@ def _fmt_aud(val) -> str:
     return f"${val:,.0f}"
 
 
+# ── Bug 3: Self-check display helper ──────────────────────────────────────────
+
+def _render_self_checks(self_checks: list, show_title: bool = True):
+    """Render the self-check results panel."""
+    if not self_checks:
+        return
+
+    if show_title:
+        st.markdown('<div class="section-header">Data Integrity Self-Checks</div>', unsafe_allow_html=True)
+
+    fails = [c for c in self_checks if c.status == "fail"]
+    warns = [c for c in self_checks if c.status == "warn"]
+    passes = [c for c in self_checks if c.status == "pass"]
+
+    if fails:
+        st.error(
+            f"**{len(fails)} check(s) FAILED** — review before proceeding. "
+            "Results may be unreliable."
+        )
+    elif warns:
+        st.warning(
+            f"**{len(warns)} data quality warning(s)** — results are available but "
+            "review warnings before relying on the analysis."
+        )
+    else:
+        st.success("All data integrity checks passed.")
+
+    check_icon = {"pass": "✅", "warn": "⚠️", "fail": "❌"}
+    check_css = {"pass": "check-pass", "warn": "check-warn", "fail": "check-fail"}
+
+    for chk in self_checks:
+        icon = check_icon.get(chk.status, "⚪")
+        css = check_css.get(chk.status, "")
+        with st.expander(
+            f"{icon} **{chk.check_name}** — {chk.status.upper()}",
+            expanded=(chk.status == "fail"),
+        ):
+            st.markdown(f"**Check:** {chk.description}")
+            st.markdown(f"**Result:** {chk.detail}")
+            st.info(f"**What does this mean?** {chk.what_it_means}")
+
+
+# ── Bug 3: Blocking FAIL override state ───────────────────────────────────────
+
+def _render_fail_override_checkbox(self_checks: list) -> bool:
+    """
+    If any checks are FAIL, show a confirmation checkbox.
+    Returns True if user has confirmed override or no FAILs exist.
+    """
+    fails = [c for c in self_checks if c.status == "fail"]
+    if not fails:
+        return True
+
+    st.markdown("---")
+    st.error(
+        "**Data integrity FAILs detected.** The analysis may be unreliable. "
+        "Please review the discrepancies above before proceeding."
+    )
+    override = st.checkbox(
+        "I have reviewed the discrepancies and wish to proceed with this data.",
+        key="self_check_fail_override",
+    )
+    return override
+
+
 # ── Session state init ─────────────────────────────────────────────────────
 
 def _init_state():
@@ -178,6 +245,9 @@ def _init_state():
         "firm_name": "Your Accounting Firm Pty Ltd",
         "ollama_model": "llama3.2",
         "ollama_running": False,
+        "debug_mode": False,              # Bug: parsedData debug mode
+        "self_check_override": False,     # Bug 3: FAIL override
+        "parsing_metadata": {},           # Bug 4/5: column and source info
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -236,7 +306,6 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### AI Commentary (Ollama)")
 
-    # Ollama status check
     _ollama_ok, _ollama_msg = check_ollama_status()
     st.session_state.ollama_running = _ollama_ok
     _status_icon = "🟢" if _ollama_ok else "🔴"
@@ -255,6 +324,16 @@ with st.sidebar:
     if not _ollama_ok:
         st.caption("Start Ollama to enable AI commentary generation.")
 
+    st.markdown("---")
+    # Bug: parsedData debug mode toggle
+    st.markdown("### Developer Options")
+    debug_mode = st.checkbox(
+        "Debug Mode (show parsed data)",
+        value=st.session_state.debug_mode,
+        help="Show full parsed data structure with section tags and classifications. Off by default.",
+    )
+    st.session_state.debug_mode = debug_mode
+
 # ── Update session info ────────────────────────────────────────────────────
 
 st.session_state.session_info = {
@@ -272,6 +351,7 @@ if run_analysis_btn:
     st.session_state.analysis_result = None
     st.session_state.commentary = ""
     st.session_state.pdf_confirmed = False
+    st.session_state.self_check_override = False
 
     industry_benchmarks = get_industry_benchmarks(industry)
 
@@ -288,6 +368,11 @@ if run_analysis_btn:
             result = run_analysis(demo, industry_benchmarks)
             st.session_state.analysis_result = result
             st.session_state.data_source = "demo"
+            st.session_state.parsing_metadata = {
+                "reference_columns": demo.get("reference_columns", []),
+                "inventory_source": demo["data"]["current"].get("_inventory_source", "demo"),
+                "data_source": "Demo Mode",
+            }
         st.success("Demo data loaded. Navigate the tabs to explore the analysis.")
 
     elif upload_type == "Xero CSV/Excel":
@@ -306,7 +391,14 @@ if run_analysis_btn:
                     st.session_state.analysis_result = result
                     st.session_state.data_source = "xero"
 
-                    # Show detected period labels
+                    ref_cols = merged.get("reference_columns", [])
+                    inv_source = merged.get("data", {}).get("current", {}).get("_inventory_source", "")
+                    st.session_state.parsing_metadata = {
+                        "reference_columns": ref_cols,
+                        "inventory_source": inv_source,
+                        "data_source": "Xero CSV/Excel",
+                    }
+
                     labels = merged["period_labels"]
                     if pl_data.get("period_fallback_warning"):
                         st.warning(
@@ -318,6 +410,13 @@ if run_analysis_btn:
                         st.success(
                             f"Xero files parsed. Detected periods: **{' | '.join(labels)}**"
                         )
+
+                    if ref_cols:
+                        st.info(
+                            f"Note reference columns detected and excluded from data extraction: "
+                            f"**{', '.join(str(c) for c in ref_cols)}**"
+                        )
+
                 except Exception as e:
                     st.error(f"Error parsing Xero files: {e}")
                     logger.exception("Xero parse error")
@@ -342,13 +441,40 @@ if run_analysis_btn:
 
 # ── PDF Confirmation Step ─────────────────────────────────────────────────
 
-if st.session_state.data_source == "pdf" and st.session_state.pdf_extracted is not None and not st.session_state.pdf_confirmed:
+if (st.session_state.data_source == "pdf"
+        and st.session_state.pdf_extracted is not None
+        and not st.session_state.pdf_confirmed):
+
     st.markdown("## Data Confirmation — Review Extracted Figures")
     st.markdown(
         "The figures below were extracted from the PDF. **Please review each value carefully** "
         "and correct any errors before running the analysis. Enter `0` for items that are not "
         "applicable. Leave blank or `0` if unknown."
     )
+
+    # Bug 4/5: Show column and source info if available
+    extracted = st.session_state.pdf_extracted
+    col_info = extracted.get("_column_info", {})
+    if col_info.get("excluded_ref_cols"):
+        st.info(
+            f"Note reference columns excluded from extraction: "
+            f"**{', '.join(str(c) for c in col_info['excluded_ref_cols'])}**"
+        )
+    if col_info.get("value_cols_used"):
+        st.info(
+            f"Value columns used for data extraction: "
+            f"**{', '.join(str(c) for c in col_info['value_cols_used'])}**"
+        )
+
+    # Bug 5: Show inventory source
+    inv_source = extracted.get("_inventory_source", "")
+    if inv_source and inv_source != "not_found":
+        st.success(f"Inventory source: **{inv_source}**")
+    elif inv_source == "not_found":
+        st.warning(
+            "Inventory was not identified in the Balance Sheet current assets section. "
+            "If the entity holds inventory, please enter the Balance Sheet value below."
+        )
 
     template = get_confirmation_template(st.session_state.pdf_extracted)
     confirmed = {}
@@ -364,15 +490,19 @@ if st.session_state.data_source == "pdf" and st.session_state.pdf_extracted is n
             default_val = info["value"]
             default_str = f"{default_val:.0f}" if default_val is not None else ""
 
+            help_text = f"Enter the {info['label']} figure from the financial statements"
+            if field == "inventory":
+                help_text = "IMPORTANT: Enter the Inventory/Stock value from the Balance Sheet current assets section only — not from the P&L."
+
             val = st.text_input(
                 label=info["label"],
                 value=default_str,
                 key=f"pdf_confirm_{field}",
-                help=f"Enter the {info['label']} figure from the financial statements"
+                help=help_text,
             )
             confirmed[field] = val
 
-        # Second period (prior year)
+        # Prior year
         st.markdown("### Prior Year (if available)")
         st.markdown(
             "If the PDF contains prior year figures, enter them below. "
@@ -408,6 +538,12 @@ if st.session_state.data_source == "pdf" and st.session_state.pdf_extracted is n
         result = run_analysis(financial_data, industry_benchmarks)
         st.session_state.analysis_result = result
         st.session_state.pdf_confirmed = True
+        inv_src = cur_data.get("_inventory_source", "user confirmed")
+        st.session_state.parsing_metadata = {
+            "reference_columns": [],
+            "inventory_source": inv_src,
+            "data_source": "PDF (user confirmed)",
+        }
         st.success("Analysis complete. Navigate the tabs above to view results.")
         st.rerun()
 
@@ -416,7 +552,6 @@ if st.session_state.data_source == "pdf" and st.session_state.pdf_extracted is n
 result: AnalysisResult = st.session_state.analysis_result
 
 if result is None:
-    # Landing page
     st.markdown("""
     # FinSight — SME Financial Analysis Tool
 
@@ -440,6 +575,7 @@ if result is None:
     - 🎯 ATO small business benchmark comparison
     - 🤖 AI-generated meeting commentary via **Ollama** (100% local — no data leaves your machine)
     - ⚠️ Automatic red flag detection
+    - 🔍 Financial data integrity self-checks before analysis
     - 📄 Export to PDF, Excel, or Word
 
     *Ensure [Ollama](https://ollama.com) is running locally to enable AI commentary generation.*
@@ -453,7 +589,30 @@ else:
     industry_display = st.session_state.session_info.get("industry") or ""
 
     st.markdown(f"## {client_display} — Financial Analysis")
-    st.markdown(f"**Industry:** {industry_display} &nbsp;|&nbsp; **Period:** {fy_display} &nbsp;|&nbsp; **Analysed:** {date.today().strftime('%d %b %Y')}")
+    st.markdown(
+        f"**Industry:** {industry_display} &nbsp;|&nbsp; "
+        f"**Period:** {fy_display} &nbsp;|&nbsp; "
+        f"**Analysed:** {date.today().strftime('%d %b %Y')}"
+    )
+
+    # ── Bug 3: Persistent data quality WARN banner ────────────────────────
+    if result.has_self_check_fails:
+        st.markdown(
+            '<div class="dq-warn-banner">'
+            '❌ <strong>Data integrity FAILs detected</strong> — analysis results may be '
+            'unreliable. Review the Data Quality panel in the Overview tab before relying '
+            'on these figures.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    elif result.has_self_check_warns:
+        st.markdown(
+            '<div class="dq-warn-banner">'
+            '⚠️ <strong>Data quality warnings exist</strong> — review before relying on results. '
+            'See the Data Quality panel in the Overview tab for details.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     if result.red_flags:
         for flag in result.red_flags:
@@ -491,6 +650,37 @@ else:
                     delta=f"{_fmt_aud((cur_v or 0) - (pri_v or 0))}{change}" if pri_v is not None else None,
                 )
 
+        # ── Bug 3: Data Quality / Self-Check Panel ────────────────────────
+        st.markdown("---")
+        with st.expander(
+            "📋 Data Quality Checks — "
+            + ("✅ All passed" if not result.has_self_check_fails and not result.has_self_check_warns
+               else ("❌ FAILs detected" if result.has_self_check_fails else "⚠️ Warnings present")),
+            expanded=(result.has_self_check_fails or result.has_self_check_warns),
+        ):
+            _render_self_checks(result.self_checks, show_title=False)
+
+            # Parsing metadata (column classification + inventory source)
+            meta = st.session_state.parsing_metadata
+            if meta:
+                st.markdown("**Parsing Details:**")
+                inv_src = meta.get("inventory_source", "")
+                if inv_src and inv_src != "not_found":
+                    st.markdown(f"- Inventory source: `{inv_src}`")
+                elif inv_src == "not_found":
+                    st.warning(
+                        "Inventory not identified on Balance Sheet — "
+                        "Quick Ratio = Current Ratio. Inventory Days not calculated."
+                    )
+                ref_cols = meta.get("reference_columns", [])
+                if ref_cols:
+                    st.markdown(
+                        f"- Note reference columns excluded from extraction: "
+                        f"`{', '.join(str(c) for c in ref_cols)}`"
+                    )
+                else:
+                    st.markdown("- No note reference columns detected")
+
         st.markdown("---")
 
         # Scorecard grid
@@ -512,6 +702,8 @@ else:
             for col, (key, m) in zip(cols, cat_metrics):
                 with col:
                     _metric_card(m.label, m.current_fmt, m.prior_fmt, m.trend, m.status, m.tooltip)
+                    if m.notes:
+                        st.caption(m.notes)
 
         # Revenue/GP/NP chart
         st.markdown("---")
@@ -530,12 +722,9 @@ else:
 
         if chart_labels:
             fig = go.Figure()
-            fig.add_trace(go.Bar(name="Revenue", x=chart_labels, y=rev_vals,
-                                 marker_color="#1B2A4A"))
-            fig.add_trace(go.Bar(name="Gross Profit", x=chart_labels, y=gp_vals,
-                                 marker_color="#3B82F6"))
-            fig.add_trace(go.Bar(name="Net Profit", x=chart_labels, y=np_vals,
-                                 marker_color="#10B981"))
+            fig.add_trace(go.Bar(name="Revenue", x=chart_labels, y=rev_vals, marker_color="#1B2A4A"))
+            fig.add_trace(go.Bar(name="Gross Profit", x=chart_labels, y=gp_vals, marker_color="#3B82F6"))
+            fig.add_trace(go.Bar(name="Net Profit", x=chart_labels, y=np_vals, marker_color="#10B981"))
             fig.update_layout(
                 barmode="group", height=350,
                 legend=dict(orientation="h", y=-0.2),
@@ -544,6 +733,29 @@ else:
                 plot_bgcolor="white", paper_bgcolor="white",
             )
             st.plotly_chart(fig, use_container_width=True)
+
+        # ── Debug mode: full parsed data structure ────────────────────────
+        if st.session_state.debug_mode:
+            st.markdown("---")
+            st.markdown("#### Debug Mode — Parsed Data Structure")
+            st.caption(
+                "This panel shows the full parsed data with section tags, component lists, "
+                "and inventory source. Toggle off in the sidebar Developer Options."
+            )
+            import json
+
+            def _make_serializable(obj):
+                if isinstance(obj, dict):
+                    return {k: _make_serializable(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [_make_serializable(i) for i in obj]
+                elif isinstance(obj, (int, float)):
+                    return obj
+                else:
+                    return str(obj)
+
+            debug_data = _make_serializable(result.raw_data)
+            st.json(debug_data)
 
     # ── TAB 1: PROFITABILITY ───────────────────────────────────────────────
     with tabs[1]:
@@ -554,22 +766,78 @@ else:
         for col, (key, m) in zip(cols, prof_metrics):
             with col:
                 _metric_card(m.label, m.current_fmt, m.prior_fmt, m.trend, m.status, m.tooltip)
+                if m.notes:
+                    st.caption(m.notes)
+
+        # ── Bug 2: EBIT/EBITDA component breakdown ────────────────────────
+        ebit_m = result.metrics.get("ebit_margin")
+        ebitda_m = result.metrics.get("ebitda_margin")
+        if ebit_m and ebit_m.components:
+            comp = ebit_m.components
+            with st.expander("EBIT & EBITDA — Component Breakdown", expanded=False):
+                st.markdown(
+                    "EBIT and EBITDA are always calculated from components "
+                    "(Net Profit + Tax + Interest + D&A). The figures used are:"
+                )
+                cur_data = result.raw_data.get("current", {}) or {}
+                ebit_val = cur_data.get("_ebit_computed")
+                ebitda_val = cur_data.get("_ebitda_computed")
+
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown("**EBIT Calculation:**")
+                    np_v = comp.get("net_profit")
+                    int_v = comp.get("interest_expense", 0)
+                    tax_v = comp.get("tax_expense", 0)
+                    st.markdown(f"- Net Profit: **{_fmt_aud(np_v)}**")
+
+                    int_items = comp.get("interest_items", [])
+                    if int_items:
+                        st.markdown(f"- Interest Expense: **{_fmt_aud(int_v)}**")
+                        for lbl, val in int_items:
+                            st.caption(f"  · {lbl}: {_fmt_aud(val)}")
+                    else:
+                        st.markdown(f"- Interest Expense: **{_fmt_aud(int_v)}** *(not identified)*")
+
+                    tax_items = comp.get("tax_items", [])
+                    if tax_items:
+                        st.markdown(f"- Tax Expense: **{_fmt_aud(tax_v)}**")
+                        for lbl, val in tax_items:
+                            st.caption(f"  · {lbl}: {_fmt_aud(val)}")
+                    else:
+                        st.markdown(f"- Tax Expense: **{_fmt_aud(tax_v)}** *(not identified)*")
+
+                    st.markdown(f"**= EBIT: {_fmt_aud(ebit_val)}**")
+
+                with col_b:
+                    st.markdown("**EBITDA Calculation:**")
+                    dep_v = comp.get("depreciation", 0)
+                    dep_items = comp.get("dep_items", [])
+                    st.markdown(f"- EBIT: **{_fmt_aud(ebit_val)}**")
+                    if dep_items:
+                        st.markdown(f"- Depreciation & Amortisation: **{_fmt_aud(dep_v)}**")
+                        for lbl, val in dep_items:
+                            st.caption(f"  · {lbl}: {_fmt_aud(val)}")
+                    else:
+                        st.markdown(f"- D&A: **{_fmt_aud(dep_v)}** *(not identified — EBITDA may be understated)*")
+                    st.markdown(f"**= EBITDA: {_fmt_aud(ebitda_val)}**")
+
+                notes = comp.get("assumption_notes", [])
+                if notes:
+                    for note in notes:
+                        st.caption(f"⚠️ {note}")
 
         # Margin trend chart
         if any(m.prior is not None for _, m in prof_metrics):
             st.markdown("---")
             st.markdown('<div class="section-header">Margin Trends</div>', unsafe_allow_html=True)
 
-            gpm = result.metrics.get("gross_profit_margin")
-            npm = result.metrics.get("net_profit_margin")
-            ebitda_m = result.metrics.get("ebitda_margin")
-
             trend_data = []
-            for p_idx, (p_key, p_lbl) in enumerate([
+            for p_key, p_lbl in [
                 ("prior2", period_labels[2] if len(period_labels) > 2 else "Prior 2"),
                 ("prior", period_labels[1] if len(period_labels) > 1 else "Prior"),
                 ("current", period_labels[0] if period_labels else "Current"),
-            ]):
+            ]:
                 d = result.raw_data.get(p_key) or {}
                 if not any(d.values()):
                     continue
@@ -578,7 +846,7 @@ else:
                     continue
                 gp = d.get("gross_profit")
                 np_ = d.get("net_profit")
-                eb = d.get("ebitda")
+                eb = d.get("_ebitda_computed") or d.get("ebitda")
                 trend_data.append({
                     "Period": p_lbl,
                     "Gross Margin %": (gp / rev * 100) if gp is not None else None,
@@ -616,7 +884,7 @@ else:
         cogs = cur_d.get("cogs") or 0
         gp = cur_d.get("gross_profit") or (rev - cogs)
         opex = cur_d.get("operating_expenses") or 0
-        ebit = cur_d.get("ebit") or (gp - opex)
+        ebit = cur_d.get("_ebit_computed") or cur_d.get("ebit") or (gp - opex)
         interest = cur_d.get("interest_expense") or 0
         tax = cur_d.get("tax_expense") or 0
         net = cur_d.get("net_profit") or 0
@@ -649,9 +917,10 @@ else:
         for col, (key, m) in zip(cols, liq_metrics):
             with col:
                 _metric_card(m.label, m.current_fmt, m.prior_fmt, m.trend, m.status, m.tooltip)
+                if m.notes:
+                    st.caption(m.notes)
 
         st.markdown("---")
-        # Gauge charts for current ratio and quick ratio
         st.markdown('<div class="section-header">Ratio Gauges</div>', unsafe_allow_html=True)
 
         gauge_cols = st.columns(2)
@@ -681,8 +950,7 @@ else:
                     },
                 }
             ))
-            fig.update_layout(height=250, margin=dict(l=20, r=20, t=40, b=0),
-                              paper_bgcolor="white")
+            fig.update_layout(height=250, margin=dict(l=20, r=20, t=40, b=0), paper_bgcolor="white")
             return fig
 
         if cr:
@@ -738,6 +1006,17 @@ else:
             )
             st.plotly_chart(fig4, use_container_width=True)
 
+        # Bug 5: Inventory source confirmation
+        meta = st.session_state.parsing_metadata
+        inv_src = meta.get("inventory_source", "")
+        if inv_src and inv_src not in ("not_found", ""):
+            st.info(f"Inventory source: **{inv_src}**")
+        elif inv_src == "not_found":
+            st.warning(
+                "Inventory not found on Balance Sheet. "
+                "Quick Ratio = Current Ratio. Inventory Days not calculated."
+            )
+
     # ── TAB 4: LEVERAGE ────────────────────────────────────────────────────
     with tabs[4]:
         st.markdown('<div class="section-header">Leverage & Solvency</div>', unsafe_allow_html=True)
@@ -748,7 +1027,6 @@ else:
             with col:
                 _metric_card(m.label, m.current_fmt, m.prior_fmt, m.trend, m.status, m.tooltip)
 
-        # Growth metrics if available
         grow_metrics = [(k, m) for k, m in result.metrics.items() if m.category == "growth"]
         if grow_metrics:
             st.markdown("---")
@@ -772,7 +1050,6 @@ else:
         )
 
         if result.benchmark_comparisons:
-            # Table
             bm_rows = []
             for key, comp in result.benchmark_comparisons.items():
                 actual = comp.get("actual_pct")
@@ -789,7 +1066,6 @@ else:
             df_bm = pd.DataFrame(bm_rows)
             st.dataframe(df_bm, use_container_width=True, hide_index=True)
 
-            # Horizontal bar chart
             st.markdown("---")
             bm_labels, bm_actuals, bm_lows, bm_highs = [], [], [], []
             for key, comp in result.benchmark_comparisons.items():
@@ -804,7 +1080,6 @@ else:
 
             if bm_labels:
                 fig5 = go.Figure()
-                # Benchmark range bars
                 fig5.add_trace(go.Bar(
                     name="ATO Benchmark Range",
                     x=[h - l for l, h in zip(bm_lows, bm_highs)],
@@ -813,7 +1088,6 @@ else:
                     base=bm_lows,
                     marker=dict(color="rgba(59,130,246,0.2)", line=dict(color="#3B82F6", width=1)),
                 ))
-                # Client actual points
                 fig5.add_trace(go.Scatter(
                     name="Client Value",
                     x=bm_actuals,
@@ -874,7 +1148,6 @@ else:
                     for chunk in generate_commentary_streaming(prompt, model=_model):
                         commentary_text += chunk
                         commentary_container.markdown(commentary_text)
-
                     st.session_state.commentary = commentary_text
                     st.success("Commentary generated. Edit below before exporting.")
                 except Exception as e:
@@ -900,6 +1173,17 @@ else:
             "Download the full analysis report in your preferred format. "
             "AI commentary will be included if generated."
         )
+
+        # Bug 3: Warn about data quality in exports
+        if result.has_self_check_fails:
+            st.error(
+                "Data integrity FAILs are present. Exports will include a data quality warning. "
+                "Review the Overview tab before distributing any reports."
+            )
+        elif result.has_self_check_warns:
+            st.warning(
+                "Data quality warnings exist. Review the Overview tab before distributing reports."
+            )
 
         client_name_export = st.session_state.session_info.get("client_name", "Client")
         safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in client_name_export)[:40]

@@ -127,3 +127,38 @@ All exports are marked **INTERNAL USE ONLY**.
 - Period detection supports: `FY2024`, `FY24`, `2023/24`, `Jul 2023 – Jun 2024`, `Year ended 30 June 2024`, `Current Year / Prior Year`
 - Number formatting: `$1,234,567` (currency), `42.3%` (ratios), `1.85x` (ratios), `47 days` (days)
 - Metric calculations are not modified by Ollama selection; only the commentary text is LLM-generated
+
+---
+
+## Parsing Accuracy — Best Practice
+
+For best results when uploading Xero CSV/Excel or PDF financial statements:
+
+### Include explicit subtotal rows
+Financial statements should ideally include explicit **subtotal/total rows** for each section:
+- `Total Revenue` or `Total Income` (not just individual revenue line items)
+- `Total Cost of Sales` or `Total Direct Costs` (not just individual COGS lines)
+- `Gross Profit` as an explicit row
+- `Total Operating Expenses`
+
+When these rows are present, the parser will use them directly. Without them, the parser sums individual line items under the detected section, which is less reliable.
+
+### Inventory — always use the Balance Sheet figure
+Inventory for ratio calculations (Current Ratio, Quick Ratio, Inventory Days) is sourced **exclusively from the Balance Sheet current assets section**. The "Closing Stock" line in the P&L COGS section is a cost adjustment and will not be used. If inventory is not detected on the Balance Sheet, the tool will note that Quick Ratio = Current Ratio and Inventory Days cannot be calculated.
+
+### Note references
+If your statements include note reference numbers in a column adjacent to account names, the parser will attempt to detect and exclude these columns automatically. The Data Quality panel shows which columns were identified as reference columns.
+
+### EBIT & EBITDA
+EBIT and EBITDA are always calculated from components (Net Profit + Tax + Interest + D&A) rather than relying on an explicit line in the statements. The component breakdown is shown in the Profitability tab.
+
+### Data Integrity Checks
+After parsing, the tool runs 6 automated self-checks before displaying results:
+1. **P&L Balance** — Revenue − COGS − OpEx − Interest − Tax = Net Profit
+2. **Gross Profit Consistency** — Parsed GP = Revenue − COGS
+3. **Balance Sheet Equation** — Total Assets = Total Liabilities + Equity
+4. **Equity Movement** — Closing Equity ≈ Opening Equity + Net Profit (±capital movements)
+5. **Current Assets Subtotal** — Sum of identified CA components ≤ Total Current Assets
+6. **Revenue Reasonableness** — Flag if revenue changed >50% YoY
+
+FAIL results (red) must be acknowledged before viewing analysis. WARN results (amber) allow proceeding but display a persistent banner.
